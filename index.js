@@ -85,8 +85,8 @@ app.get('/health', (req, res) => {
 });
 
 // Root route
-app.get('/', (req, res) => {
-  res.send('Welcome to Bhatkar Perfumes API Server.');
+app.get('/health', (req, res) => {
+  res.status(200).json({ message: 'Bhatkar Perfumes backend server is running.' });
 });
 
 // 404 Route handler
