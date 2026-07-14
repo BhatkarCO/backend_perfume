@@ -1,0 +1,33 @@
+{
+  "name": "bhatkar-perfumes-backend",
+  "version": "1.0.0",
+  "description": "Backend API for Bhatkar Perfumes Luxury E-Commerce",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "seed": "node models/seed.js"
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.10.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.2.0",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^9.7.3",
+    "multer": "^2.2.0",
+    "nodemailer": "^6.9.13",
+    "pdfkit": "^0.15.0",
+    "razorpay": "^2.9.2",
+    "resend": "^6.17.1",
+    "sharp": "^0.35.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
