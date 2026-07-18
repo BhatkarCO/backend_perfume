@@ -1,20 +1,15 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
-import crypto from "crypto";
 import User from "../models/User.js";
 import OTP from "../models/OTP.js";
 import { sendOTPEmail } from "../utils/resendEmail.js";
+import { generateOTP } from "../utils/otp.js";
 
 dotenv.config();
 
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretscentoraauthkey";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
-
-// Generate 6-digit numeric OTP cryptographically secure
-const generateOTP = () => {
-  return crypto.randomInt(100000, 999999).toString();
-};
 
 /**
  * Register User
@@ -126,16 +121,26 @@ export const login = async (req, res) => {
       },
     );
 
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite:
+        process.env.NODE_ENV === "production"
+          ? "None"
+          : "Lax",  // Set to "None" for cross-site cookies in production, "Lax" for development
+
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+
     res.status(200).json({
       message: "Login successful.",
-      token,
       user: {
         id: user.id,
         email: user.email,
         name: user.name,
         role: user.role,
         is_verified: user.is_verified,
-      },
+      }
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -207,9 +212,18 @@ export const verifyOTP = async (req, res) => {
       },
     );
 
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite:
+        process.env.NODE_ENV === "production"
+          ? "None"
+          : "Lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
     res.status(200).json({
       message: "Email verified successfully.",
-      token,
       user: {
         id: user.id,
         email: user.email,
@@ -420,4 +434,41 @@ export const resetPassword = async (req, res) => {
     console.error("Reset password error:", error);
     res.status(500).json({ message: "Internal server error." });
   }
+};
+
+/**
+ * Get Current Logged-in User
+ */
+export const getCurrentUser = async (req, res) => {
+  try {
+    res.status(200).json({
+      user: {
+        id: req.user.id,
+        email: req.user.email,
+        name: req.user.name,
+        role: req.user.role,
+        is_verified: req.user.is_verified,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to fetch user.",
+    });
+  }
+};
+
+//logout user and clear the token cookie
+export const logout = (req, res) => {
+  res.clearCookie("token", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite:
+      process.env.NODE_ENV === "production"
+        ? "None"
+        : "Lax",
+  });
+
+  res.status(200).json({
+    message: "Logged out successfully.",
+  });
 };

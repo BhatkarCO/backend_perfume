@@ -19,6 +19,7 @@ import userRoutes from './routes/userRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import contactRoutes from './routes/contactRoutes.js';
 import chatRoutes from "./routes/chatRoutes.js";
+import cookieParser from "cookie-parser";
 
 dotenv.config();
 
@@ -48,6 +49,9 @@ const corsOptions = {
   credentials: true,
 };
 app.use(cors(corsOptions));
+
+// Use cookie parser middleware
+app.use(cookieParser());
 
 // JSON Request Parser
 app.use(express.json());

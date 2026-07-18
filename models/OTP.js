@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 const otpSchema = new mongoose.Schema({
   email: { type: String, required: true, lowercase: true },
   otp: { type: String, required: true }, // Hashed OTP
-  purpose: { type: String, enum: ['register', 'forgot-password'], required: true },
+  purpose: { type: String, enum: ['register', 'forgot-password', 'delete-account'], required: true },
   userData: { type: mongoose.Schema.Types.Mixed }, // Contains { name, password (hashed), phone }
   expiresAt: { type: Date, required: true },
   verified: { type: Boolean, default: false },

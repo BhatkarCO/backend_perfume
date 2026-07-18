@@ -15,7 +15,7 @@ const generateInvoiceBuffer = (order, items) => {
       doc.on("data", (chunk) => chunks.push(chunk));
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", (err) => reject(err));
-      
+
       drawInvoicePDF(doc, order, items);
     } catch (err) {
       reject(err);
@@ -31,7 +31,9 @@ export const sendInvoiceEmail = async (order, items) => {
   const fromEmail = process.env.EMAIL_FROM || "noreply@bhatkarco.com";
 
   if (!apiKey) {
-    console.warn("RESEND_API_KEY not configured. Skipping automated invoice email.");
+    console.warn(
+      "RESEND_API_KEY not configured. Skipping automated invoice email.",
+    );
     return false;
   }
 
@@ -46,20 +48,26 @@ export const sendInvoiceEmail = async (order, items) => {
     const pdfBuffer = await generateInvoiceBuffer(order, items);
 
     const subject = `Your Bhatkar Perfumes Order Invoice - #${order.id}`;
-    
+
     // Order Summary items bullet points
-    const itemsHtml = items.map(item => `
+    const itemsHtml = items
+      .map(
+        (item) => `
       <li>
         <strong>${item.name}</strong> x ${item.quantity} - ₹${parseFloat(item.price_at_purchase).toFixed(2)}
       </li>
-    `).join("");
+    `,
+      )
+      .join("");
 
-    const orderDate = new Date(order.created_at || new Date()).toLocaleDateString("en-IN");
+    const orderDate = new Date(
+      order.created_at || new Date(),
+    ).toLocaleDateString("en-IN");
 
     const htmlContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #121212; border: 1px solid #e5e7eb; border-top: 4px solid #D4AF37; padding: 24px; border-radius: 4px;">
         <h2 style="color: #D4AF37; margin-bottom: 20px; font-family: 'Georgia', serif;">Thank You for Your Order!</h2>
-        <p>Dear ${order.customer_name || 'Valued Customer'},</p>
+        <p>Dear ${order.customer_name || "Valued Customer"},</p>
         <p>Your order has been successfully placed. We are preparing it with the utmost care.</p>
         
         <div style="background-color: #f9fafb; border: 1px solid #f3f4f6; padding: 16px; margin: 20px 0; border-radius: 4px;">
@@ -95,11 +103,11 @@ export const sendInvoiceEmail = async (order, items) => {
         {
           filename: `Invoice_Bhatkar_${order.id}.pdf`,
           content: pdfBuffer,
-        }
-      ]
+        },
+      ],
     });
 
-    console.log("Resend email response:", response);
+    //console.log("Resend email response:", response);
     return true;
   } catch (error) {
     console.error("Resend email delivery failed:", error);
@@ -115,7 +123,9 @@ export const sendOTPEmail = async (email, otp) => {
   const fromEmail = process.env.EMAIL_FROM || "noreply@bhatkar-perfumes.com";
 
   if (!apiKey) {
-    console.warn("RESEND_API_KEY not configured. Skipping automated OTP email.");
+    console.warn(
+      "RESEND_API_KEY not configured. Skipping automated OTP email.",
+    );
     console.log(`[Resend simulation] To: ${email}, OTP: ${otp}`);
     return true; // Return true as simulation success
   }
@@ -147,11 +157,10 @@ export const sendOTPEmail = async (email, otp) => {
       html: htmlContent,
     });
 
-    console.log("Resend OTP email response:", response);
+    //console.log("Resend OTP email response:", response);
     return true;
   } catch (error) {
     console.error("Resend OTP email delivery failed:", error);
     return false;
   }
 };
-
