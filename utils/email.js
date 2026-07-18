@@ -114,4 +114,3 @@ export const sendContactEmail = async (user) => {
     return false;
   }
 };
-

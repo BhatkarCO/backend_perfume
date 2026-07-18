@@ -1,9 +1,11 @@
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
 import User from "../models/User.js";
+import bcrypt from "bcryptjs";
 import InventoryLog from "../models/InventoryLog.js";
 import { uploadAsset } from "../config/cloudinary.js";
 import { sendEmail } from "../utils/email.js";
+import { sendOTPEmail } from "../utils/resendEmail.js";
 
 // --- PRODUCT MANAGEMENT ---
 
@@ -33,9 +35,9 @@ export const addProduct = async (req, res) => {
   }
 
   if (sale_price && parseFloat(sale_price) > parseFloat(price)) {
-    return res
-      .status(400)
-      .json({ message: "Sale price cannot be higher than the standard price (MRP)." });
+    return res.status(400).json({
+      message: "Sale price cannot be higher than the standard price (MRP).",
+    });
   }
 
   try {
@@ -55,7 +57,9 @@ export const addProduct = async (req, res) => {
           : fragrance_notes;
     }
 
-    const dbGender = gender ? (gender.charAt(0).toUpperCase() + gender.slice(1).toLowerCase()) : null;
+    const dbGender = gender
+      ? gender.charAt(0).toUpperCase() + gender.slice(1).toLowerCase()
+      : null;
 
     // Handle uploaded images if any
     const images = [];
@@ -69,7 +73,7 @@ export const addProduct = async (req, res) => {
         );
         images.push({
           image_url: uploadedUrl,
-          is_primary: i === 0
+          is_primary: i === 0,
         });
       }
     }
@@ -88,7 +92,7 @@ export const addProduct = async (req, res) => {
       is_best_selling: is_best_selling === "true" || is_best_selling === true,
       is_new_arrival: is_new_arrival === "true" || is_new_arrival === true,
       fragrance_notes: parsedNotes,
-      images
+      images,
     });
 
     await newProduct.save();
@@ -97,11 +101,13 @@ export const addProduct = async (req, res) => {
     const log = new InventoryLog({
       product_id: newProduct.id,
       change_amount: newProduct.stock_quantity,
-      reason: "Admin creation initial stock"
+      reason: "Admin creation initial stock",
     });
     await log.save();
 
-    res.status(201).json({ message: "Product added successfully.", product: newProduct });
+    res
+      .status(201)
+      .json({ message: "Product added successfully.", product: newProduct });
   } catch (error) {
     console.error("Add product error:", error);
     res.status(500).json({ message: "Error adding product." });
@@ -136,12 +142,17 @@ export const editProduct = async (req, res) => {
     }
 
     const finalPrice = price ? parseFloat(price) : product.price;
-    const finalSalePrice = sale_price !== undefined ? (sale_price ? parseFloat(sale_price) : null) : product.sale_price;
+    const finalSalePrice =
+      sale_price !== undefined
+        ? sale_price
+          ? parseFloat(sale_price)
+          : null
+        : product.sale_price;
 
     if (finalSalePrice && finalSalePrice > finalPrice) {
-      return res
-        .status(400)
-        .json({ message: "Sale price cannot be higher than the standard price (MRP)." });
+      return res.status(400).json({
+        message: "Sale price cannot be higher than the standard price (MRP).",
+      });
     }
 
     const previousStock = product.stock_quantity;
@@ -168,40 +179,50 @@ export const editProduct = async (req, res) => {
       product.slug = slug;
     }
     if (description) product.description = description;
-    if (short_description !== undefined) product.short_description = short_description;
+    if (short_description !== undefined)
+      product.short_description = short_description;
     if (price) product.price = parseFloat(price);
-    if (sale_price !== undefined) product.sale_price = sale_price ? parseFloat(sale_price) : null;
-    if (stock_quantity !== undefined) product.stock_quantity = parseInt(stock_quantity);
+    if (sale_price !== undefined)
+      product.sale_price = sale_price ? parseFloat(sale_price) : null;
+    if (stock_quantity !== undefined)
+      product.stock_quantity = parseInt(stock_quantity);
     if (category_id !== undefined) product.category_id = category_id || null;
-    if (gender) product.gender = gender.charAt(0).toUpperCase() + gender.slice(1).toLowerCase();
-    
+    if (gender)
+      product.gender =
+        gender.charAt(0).toUpperCase() + gender.slice(1).toLowerCase();
+
     if (is_featured !== undefined) {
       product.is_featured = is_featured === "true" || is_featured === true;
     }
     if (is_best_selling !== undefined) {
-      product.is_best_selling = is_best_selling === "true" || is_best_selling === true;
+      product.is_best_selling =
+        is_best_selling === "true" || is_best_selling === true;
     }
     if (is_new_arrival !== undefined) {
-      product.is_new_arrival = is_new_arrival === "true" || is_new_arrival === true;
+      product.is_new_arrival =
+        is_new_arrival === "true" || is_new_arrival === true;
     }
     if (parsedNotes !== undefined) {
       product.fragrance_notes = parsedNotes;
     }
 
     // Log stock change if stock_quantity was updated
-    if (stock_quantity !== undefined && parseInt(stock_quantity) !== previousStock) {
+    if (
+      stock_quantity !== undefined &&
+      parseInt(stock_quantity) !== previousStock
+    ) {
       const difference = parseInt(stock_quantity) - previousStock;
       const log = new InventoryLog({
         product_id: id,
         change_amount: difference,
-        reason: "Admin stock adjustment manual update"
+        reason: "Admin stock adjustment manual update",
       });
       await log.save();
     }
 
     // Process new images if uploaded
     if (req.files && req.files.length > 0) {
-      const hasPrimary = product.images.some(img => img.is_primary);
+      const hasPrimary = product.images.some((img) => img.is_primary);
       for (let i = 0; i < req.files.length; i++) {
         const file = req.files[i];
         const uploadedUrl = await uploadAsset(
@@ -254,13 +275,16 @@ export const deleteProduct = async (req, res) => {
  */
 export const getAdminOrders = async (req, res) => {
   try {
-    const orders = await Order.find().populate('user_id').sort({ created_at: -1 }).lean();
+    const orders = await Order.find()
+      .populate("user_id")
+      .sort({ created_at: -1 })
+      .lean();
 
-    const formattedOrders = orders.map(o => ({
+    const formattedOrders = orders.map((o) => ({
       ...o,
       id: o._id.toString(),
-      customer_name: o.user_id?.name || 'Unknown',
-      customer_email: o.user_id?.email || 'Unknown'
+      customer_name: o.user_id?.name || "Unknown",
+      customer_email: o.user_id?.email || "Unknown",
     }));
 
     res.status(200).json(formattedOrders);
@@ -337,13 +361,13 @@ export const updateOrderStatus = async (req, res) => {
 export const getAdminUsers = async (req, res) => {
   try {
     const users = await User.find()
-      .select('email role name phone is_verified created_at')
+      .select("email role name phone is_verified created_at")
       .sort({ created_at: -1 })
       .lean();
 
-    const formattedUsers = users.map(u => ({
+    const formattedUsers = users.map((u) => ({
       ...u,
-      id: u._id.toString()
+      id: u._id.toString(),
     }));
 
     res.status(200).json(formattedUsers);
@@ -366,8 +390,8 @@ export const toggleBlockUser = async (req, res) => {
     const user = await User.findByIdAndUpdate(
       userId,
       { role },
-      { new: true }
-    ).select('id email role name');
+      { new: true },
+    ).select("id email role name");
 
     if (!user) {
       return res.status(404).json({ message: "User not found." });
@@ -406,8 +430,8 @@ export const getAdminReports = async (req, res) => {
       }
     }
 
-    const allTimeCondition = { status: { $nin: ['Pending', 'Cancelled'] } };
-    const matchCondition = { status: { $nin: ['Pending', 'Cancelled'] } };
+    const allTimeCondition = { status: { $nin: ["Pending", "Cancelled"] } };
+    const matchCondition = { status: { $nin: ["Pending", "Cancelled"] } };
     if (dateFilter.created_at) {
       matchCondition.created_at = dateFilter.created_at;
     }
@@ -419,69 +443,71 @@ export const getAdminReports = async (req, res) => {
         $group: {
           _id: null,
           total_orders: { $sum: 1 },
-          total_revenue: { $sum: '$total_amount' },
-          avg_order_value: { $avg: '$total_amount' }
-        }
-      }
+          total_revenue: { $sum: "$total_amount" },
+          avg_order_value: { $avg: "$total_amount" },
+        },
+      },
     ]);
-    
-    const summary = salesStats[0] ? {
-      total_orders: salesStats[0].total_orders.toString(),
-      total_revenue: salesStats[0].total_revenue.toFixed(2),
-      avg_order_value: salesStats[0].avg_order_value.toFixed(2)
-    } : {
-      total_orders: "0",
-      total_revenue: "0.00",
-      avg_order_value: "0.00"
-    };
+
+    const summary = salesStats[0]
+      ? {
+          total_orders: salesStats[0].total_orders.toString(),
+          total_revenue: salesStats[0].total_revenue.toFixed(2),
+          avg_order_value: salesStats[0].avg_order_value.toFixed(2),
+        }
+      : {
+          total_orders: "0",
+          total_revenue: "0.00",
+          avg_order_value: "0.00",
+        };
 
     // 2. Inventory Alert (Products below threshold of 10 items)
     const lowStockRaw = await Product.find({ stock_quantity: { $lt: 10 } })
-      .select('name slug stock_quantity price')
+      .select("name slug stock_quantity price")
       .sort({ stock_quantity: 1 })
       .lean();
 
-    const lowStock = lowStockRaw.map(p => ({
+    const lowStock = lowStockRaw.map((p) => ({
       ...p,
-      id: p._id.toString()
+      id: p._id.toString(),
     }));
 
     // 3. Top-selling Perfumes
     const topProducts = await Order.aggregate([
       { $match: matchCondition },
-      { $unwind: '$items' },
+      { $unwind: "$items" },
       {
         $group: {
-          _id: '$items.product_id',
-          total_sold: { $sum: '$items.quantity' }
-        }
+          _id: "$items.product_id",
+          total_sold: { $sum: "$items.quantity" },
+        },
       },
       { $sort: { total_sold: -1 } },
       { $limit: 5 },
       {
         $lookup: {
-          from: 'products',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'product'
-        }
+          from: "products",
+          localField: "_id",
+          foreignField: "_id",
+          as: "product",
+        },
       },
-      { $unwind: '$product' },
+      { $unwind: "$product" },
       {
         $project: {
-          id: '$_id',
-          name: '$product.name',
-          slug: '$product.slug',
-          price: '$product.price',
-          rating: '$product.rating',
+          id: "$_id",
+          name: "$product.name",
+          slug: "$product.slug",
+          price: "$product.price",
+          rating: "$product.rating",
           total_sold: 1,
-          _id: 0
-        }
-      }
+          _id: 0,
+        },
+      },
     ]);
 
     // 4. Sales over time (Daily sales for range or default last 7 days)
-    const dailyMatch = { status: { $nin: ['Pending', 'Cancelled'] } };
+    const dailyMatch = { status: { $nin: ["Pending", "Cancelled"] } };
     if (dateFilter.created_at) {
       dailyMatch.created_at = dateFilter.created_at;
     } else {
@@ -494,20 +520,20 @@ export const getAdminReports = async (req, res) => {
       { $match: dailyMatch },
       {
         $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$created_at' } },
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$created_at" } },
           orders_count: { $sum: 1 },
-          revenue: { $sum: '$total_amount' }
-        }
+          revenue: { $sum: "$total_amount" },
+        },
       },
       {
         $project: {
-          date: '$_id',
+          date: "$_id",
           orders_count: 1,
           revenue: 1,
-          _id: 0
-        }
+          _id: 0,
+        },
       },
-      { $sort: { date: 1 } }
+      { $sort: { date: 1 } },
     ]);
 
     // 5. Date-wise collection
@@ -515,20 +541,20 @@ export const getAdminReports = async (req, res) => {
       { $match: matchCondition },
       {
         $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$created_at' } },
-          revenue: { $sum: '$total_amount' },
-          orders_count: { $sum: 1 }
-        }
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$created_at" } },
+          revenue: { $sum: "$total_amount" },
+          orders_count: { $sum: 1 },
+        },
       },
       {
         $project: {
-          date: '$_id',
+          date: "$_id",
           revenue: 1,
           orders_count: 1,
-          _id: 0
-        }
+          _id: 0,
+        },
       },
-      { $sort: { date: -1 } }
+      { $sort: { date: -1 } },
     ]);
 
     // 6. Day-wise collection (Day of the week)
@@ -536,18 +562,26 @@ export const getAdminReports = async (req, res) => {
       { $match: matchCondition },
       {
         $group: {
-          _id: { $dayOfWeek: '$created_at' },
-          revenue: { $sum: '$total_amount' },
-          orders_count: { $sum: 1 }
-        }
+          _id: { $dayOfWeek: "$created_at" },
+          revenue: { $sum: "$total_amount" },
+          orders_count: { $sum: 1 },
+        },
       },
-      { $sort: { _id: 1 } }
+      { $sort: { _id: 1 } },
     ]);
-    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-    const dayWiseFormatted = dayWise.map(d => ({
+    const dayNames = [
+      "Sunday",
+      "Monday",
+      "Tuesday",
+      "Wednesday",
+      "Thursday",
+      "Friday",
+      "Saturday",
+    ];
+    const dayWiseFormatted = dayWise.map((d) => ({
       day: dayNames[d._id - 1] || `Unknown (${d._id})`,
       revenue: d.revenue.toFixed(2),
-      orders_count: d.orders_count
+      orders_count: d.orders_count,
     }));
 
     // 7. Week-wise collection
@@ -555,19 +589,19 @@ export const getAdminReports = async (req, res) => {
       { $match: matchCondition },
       {
         $group: {
-          _id: { $dateToString: { format: '%G-W%V', date: '$created_at' } },
-          revenue: { $sum: '$total_amount' },
-          orders_count: { $sum: 1 }
-        }
+          _id: { $dateToString: { format: "%G-W%V", date: "$created_at" } },
+          revenue: { $sum: "$total_amount" },
+          orders_count: { $sum: 1 },
+        },
       },
-      { $sort: { _id: -1 } }
+      { $sort: { _id: -1 } },
     ]);
-    const weekWiseFormatted = weekWise.map(w => {
-      const parts = w._id.split('-W');
+    const weekWiseFormatted = weekWise.map((w) => {
+      const parts = w._id.split("-W");
       return {
         week: parts[1] ? `Week ${parts[1]}, ${parts[0]}` : w._id,
         revenue: w.revenue.toFixed(2),
-        orders_count: w.orders_count
+        orders_count: w.orders_count,
       };
     });
 
@@ -576,21 +610,37 @@ export const getAdminReports = async (req, res) => {
       { $match: matchCondition },
       {
         $group: {
-          _id: { $dateToString: { format: '%Y-%m', date: '$created_at' } },
-          revenue: { $sum: '$total_amount' },
-          orders_count: { $sum: 1 }
-        }
+          _id: { $dateToString: { format: "%Y-%m", date: "$created_at" } },
+          revenue: { $sum: "$total_amount" },
+          orders_count: { $sum: 1 },
+        },
       },
-      { $sort: { _id: -1 } }
+      { $sort: { _id: -1 } },
     ]);
-    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-    const monthWiseFormatted = monthWise.map(m => {
-      const [year, monthStr] = m._id.split('-');
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    const monthWiseFormatted = monthWise.map((m) => {
+      const [year, monthStr] = m._id.split("-");
       const monthIndex = parseInt(monthStr, 10) - 1;
       return {
-        month: (monthIndex >= 0 && monthIndex < 12) ? `${monthNames[monthIndex]} ${year}` : m._id,
+        month:
+          monthIndex >= 0 && monthIndex < 12
+            ? `${monthNames[monthIndex]} ${year}`
+            : m._id,
         revenue: m.revenue.toFixed(2),
-        orders_count: m.orders_count
+        orders_count: m.orders_count,
       };
     });
 
@@ -607,5 +657,85 @@ export const getAdminReports = async (req, res) => {
   } catch (error) {
     console.error("Fetch admin reports error:", error);
     res.status(500).json({ message: "Error compiling analytics reports." });
+  }
+};
+
+export const forgotAdminPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const admin = await User.findOne({
+      email: email.toLowerCase(),
+      role: "admin",
+    });
+
+    if (!admin) {
+      return res.status(404).json({
+        message: "Admin account not found.",
+      });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    admin.otp_code = otp;
+    admin.otp_expires_at = new Date(Date.now() + 10 * 60 * 1000);
+
+    await admin.save();
+
+    await sendOTPEmail(admin.email, otp);
+
+    res.json({
+      message: "If an admin account exists for this email, an OTP has been sent.",
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      message: "Server Error",
+    });
+  }
+};
+
+export const resetAdminPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    const admin = await User.findOne({
+      email: email.toLowerCase(),
+      role: "admin",
+    });
+
+    if (!admin) {
+      return res.status(404).json({
+        message: "Admin not found.",
+      });
+    }
+
+    if (
+      admin.otp_code !== otp ||
+      !admin.otp_expires_at ||
+      admin.otp_expires_at < new Date()
+    ) {
+      return res.status(400).json({
+        message: "Invalid or expired OTP.",
+      });
+    }
+
+    admin.password_hash = await bcrypt.hash(newPassword, 10);
+
+    admin.otp_code = undefined;
+    admin.otp_expires_at = undefined;
+
+    await admin.save();
+
+    res.json({
+      message: "Password reset successfully.",
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      message: "Server Error",
+    });
   }
 };
