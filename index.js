@@ -38,16 +38,27 @@ app.use(helmet({
   crossOriginResourcePolicy: false, // crucial for serving local uploaded files to react
 }));
 
-// CORS Configuration
+const allowedOrigins = [
+  "https://frontend-perfume-eight.vercel.app",
+  //"https://bhatkarco.com",
+];
+
 const corsOptions = {
   origin: (origin, callback) => {
-    // Dynamically allow any origin (required for credentials support)
-    callback(null, true);
+    // Allow requests with no Origin (Postman, server-to-server)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error("Not allowed by CORS"));
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
 };
+
 app.use(cors(corsOptions));
 
 // Use cookie parser middleware
