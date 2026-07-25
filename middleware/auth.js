@@ -10,6 +10,12 @@ const JWT_SECRET = process.env.JWT_SECRET || "supersecretscentoraauthkey";
  * Verify JWT token middleware
  */
 export const verifyToken = async (req, res, next) => {
+  console.log("========== VERIFY TOKEN ==========");
+  console.log("Cookie Header:", req.headers.cookie);
+  console.log("Cookies Object:", req.cookies);
+  console.log("Origin:", req.headers.origin);
+  console.log("Host:", req.headers.host);
+
   const token = req.cookies.token;
 
   if (!token) {
@@ -22,7 +28,9 @@ export const verifyToken = async (req, res, next) => {
     const decoded = jwt.verify(token, JWT_SECRET);
 
     // Check if user still exists in database
-    const user = await User.findById(decoded.id).select("email role name is_verified");
+    const user = await User.findById(decoded.id).select(
+      "email role name is_verified",
+    );
     if (!user) {
       return res.status(401).json({ message: "User no longer exists." });
     }
@@ -56,12 +64,10 @@ export const isAdmin = (req, res, next) => {
  */
 export const isVerified = (req, res, next) => {
   if (!req.user || !req.user.is_verified) {
-    return res
-      .status(403)
-      .json({
-        message: "Access denied. Email verification required.",
-        requires_verification: true,
-      });
+    return res.status(403).json({
+      message: "Access denied. Email verification required.",
+      requires_verification: true,
+    });
   }
   next();
 };
