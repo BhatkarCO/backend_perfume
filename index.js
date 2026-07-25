@@ -25,9 +25,10 @@ dotenv.config();
 
 // Connect to MongoDB
 connectDB();
+
+const app = express();
 // Trust Render's reverse proxy
 app.set("trust proxy", 1);
-const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Resolve __dirname in ES Modules
