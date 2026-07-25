@@ -31,13 +31,16 @@ export const register = async (req, res) => {
     }
 
     // Check if an unverified registration already exists
-    const existingOTP = await OTP.findOne({ email: email.toLowerCase(), purpose: "register" });
+    const existingOTP = await OTP.findOne({
+      email: email.toLowerCase(),
+      purpose: "register",
+    });
     if (existingOTP) {
       // Prevent OTP resend more than once every 60 seconds
       const elapsed = Date.now() - new Date(existingOTP.lastSentAt).getTime();
       if (elapsed < 60000) {
         return res.status(429).json({
-          message: `Please wait ${Math.ceil((60000 - elapsed) / 1000)} seconds before requesting a new OTP.`
+          message: `Please wait ${Math.ceil((60000 - elapsed) / 1000)} seconds before requesting a new OTP.`,
         });
       }
     }
@@ -53,7 +56,11 @@ export const register = async (req, res) => {
     // Store or replace OTP record
     if (existingOTP) {
       existingOTP.otp = hashedOTP;
-      existingOTP.userData = { name, password: passwordHash, phone: phone || null };
+      existingOTP.userData = {
+        name,
+        password: passwordHash,
+        phone: phone || null,
+      };
       existingOTP.expiresAt = expiresAt;
       existingOTP.attempts = 0;
       existingOTP.lastSentAt = new Date();
@@ -66,7 +73,7 @@ export const register = async (req, res) => {
         purpose: "register",
         userData: { name, password: passwordHash, phone: phone || null },
         expiresAt,
-        lastSentAt: new Date()
+        lastSentAt: new Date(),
       });
       await otpDoc.save();
     }
@@ -75,7 +82,7 @@ export const register = async (req, res) => {
     await sendOTPEmail(email.toLowerCase(), otp);
 
     res.status(200).json({
-      message: "Verification OTP sent to your email."
+      message: "Verification OTP sent to your email.",
     });
   } catch (error) {
     console.error("Registration error:", error);
@@ -103,7 +110,9 @@ export const login = async (req, res) => {
 
     // Check if user is verified
     if (!user.is_verified) {
-      return res.status(400).json({ message: "Email not verified. Please register again." });
+      return res
+        .status(400)
+        .json({ message: "Email not verified. Please register again." });
     }
 
     // Check password
@@ -123,10 +132,10 @@ export const login = async (req, res) => {
 
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "None",  // Set to "None" for cross-site cookies in production, "Lax" for development
-
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      secure: true,
+      sameSite: "None",
+      path: "/",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
     res.status(200).json({
@@ -137,7 +146,7 @@ export const login = async (req, res) => {
         name: user.name,
         role: user.role,
         is_verified: user.is_verified,
-      }
+      },
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -156,14 +165,23 @@ export const verifyOTP = async (req, res) => {
   }
 
   try {
-    const otpRecord = await OTP.findOne({ email: email.toLowerCase(), purpose: "register" });
+    const otpRecord = await OTP.findOne({
+      email: email.toLowerCase(),
+      purpose: "register",
+    });
     if (!otpRecord) {
-      return res.status(400).json({ message: "Verification record not found or expired. Please register again." });
+      return res.status(400).json({
+        message:
+          "Verification record not found or expired. Please register again.",
+      });
     }
 
     // Check attempts limit (max 5 attempts)
     if (otpRecord.attempts >= 5) {
-      return res.status(400).json({ message: "Maximum verification attempts exceeded. Please register again." });
+      return res.status(400).json({
+        message:
+          "Maximum verification attempts exceeded. Please register again.",
+      });
     }
 
     // Increment attempts
@@ -172,7 +190,9 @@ export const verifyOTP = async (req, res) => {
 
     // Check expiration
     if (new Date() > otpRecord.expiresAt) {
-      return res.status(400).json({ message: "OTP has expired. Please register again." });
+      return res
+        .status(400)
+        .json({ message: "OTP has expired. Please register again." });
     }
 
     // Compare OTP
@@ -192,7 +212,7 @@ export const verifyOTP = async (req, res) => {
       password_hash: password,
       name,
       phone: phone || null,
-      is_verified: true
+      is_verified: true,
     });
 
     await user.save();
@@ -211,8 +231,9 @@ export const verifyOTP = async (req, res) => {
 
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: true,
       sameSite: "None",
+      path: "/",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
@@ -224,7 +245,7 @@ export const verifyOTP = async (req, res) => {
         name: user.name,
         role: user.role,
         is_verified: true,
-      }
+      },
     });
   } catch (error) {
     console.error("OTP verification error:", error);
@@ -243,16 +264,21 @@ export const resendOTP = async (req, res) => {
   }
 
   try {
-    const otpRecord = await OTP.findOne({ email: email.toLowerCase(), purpose });
+    const otpRecord = await OTP.findOne({
+      email: email.toLowerCase(),
+      purpose,
+    });
     if (!otpRecord) {
-      return res.status(400).json({ message: "Verification record not found or expired." });
+      return res
+        .status(400)
+        .json({ message: "Verification record not found or expired." });
     }
 
     // Prevent OTP resend more than once every 60 seconds
     const elapsed = Date.now() - new Date(otpRecord.lastSentAt).getTime();
     if (elapsed < 60000) {
       return res.status(429).json({
-        message: `Please wait ${Math.ceil((60000 - elapsed) / 1000)} seconds before requesting a new OTP.`
+        message: `Please wait ${Math.ceil((60000 - elapsed) / 1000)} seconds before requesting a new OTP.`,
       });
     }
 
@@ -292,16 +318,21 @@ export const forgotPassword = async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) {
       // For security, do not reveal if the email exists. Return success message anyway.
-      return res.status(200).json({ message: "If email exists, a reset code has been sent." });
+      return res
+        .status(200)
+        .json({ message: "If email exists, a reset code has been sent." });
     }
 
     // Check if a forgot password OTP already exists to enforce 60s rule
-    const existingOTP = await OTP.findOne({ email: email.toLowerCase(), purpose: "forgot-password" });
+    const existingOTP = await OTP.findOne({
+      email: email.toLowerCase(),
+      purpose: "forgot-password",
+    });
     if (existingOTP) {
       const elapsed = Date.now() - new Date(existingOTP.lastSentAt).getTime();
       if (elapsed < 60000) {
         return res.status(429).json({
-          message: `Please wait ${Math.ceil((60000 - elapsed) / 1000)} seconds before requesting a new OTP.`
+          message: `Please wait ${Math.ceil((60000 - elapsed) / 1000)} seconds before requesting a new OTP.`,
         });
       }
     }
@@ -323,7 +354,7 @@ export const forgotPassword = async (req, res) => {
         otp: hashedOTP,
         purpose: "forgot-password",
         expiresAt,
-        lastSentAt: new Date()
+        lastSentAt: new Date(),
       });
       await otpDoc.save();
     }
@@ -331,7 +362,9 @@ export const forgotPassword = async (req, res) => {
     // Send email via Resend
     await sendOTPEmail(email.toLowerCase(), otp);
 
-    res.status(200).json({ message: "If email exists, a reset code has been sent." });
+    res
+      .status(200)
+      .json({ message: "If email exists, a reset code has been sent." });
   } catch (error) {
     console.error("Forgot password error:", error);
     res.status(500).json({ message: "Internal server error." });
@@ -349,14 +382,21 @@ export const verifyForgotPasswordOTP = async (req, res) => {
   }
 
   try {
-    const otpRecord = await OTP.findOne({ email: email.toLowerCase(), purpose: "forgot-password" });
+    const otpRecord = await OTP.findOne({
+      email: email.toLowerCase(),
+      purpose: "forgot-password",
+    });
     if (!otpRecord) {
-      return res.status(400).json({ message: "Reset code not found or expired. Please request again." });
+      return res.status(400).json({
+        message: "Reset code not found or expired. Please request again.",
+      });
     }
 
     // Check attempts limit (max 5 attempts)
     if (otpRecord.attempts >= 5) {
-      return res.status(400).json({ message: "Maximum reset code attempts exceeded. Please try again." });
+      return res.status(400).json({
+        message: "Maximum reset code attempts exceeded. Please try again.",
+      });
     }
 
     // Increment attempts
@@ -365,7 +405,9 @@ export const verifyForgotPasswordOTP = async (req, res) => {
 
     // Check expiration
     if (new Date() > otpRecord.expiresAt) {
-      return res.status(400).json({ message: "Reset code has expired. Please try again." });
+      return res
+        .status(400)
+        .json({ message: "Reset code has expired. Please try again." });
     }
 
     // Compare OTP
@@ -378,7 +420,9 @@ export const verifyForgotPasswordOTP = async (req, res) => {
     otpRecord.verified = true;
     await otpRecord.save();
 
-    res.status(200).json({ message: "OTP verified successfully. You can now reset your password." });
+    res.status(200).json({
+      message: "OTP verified successfully. You can now reset your password.",
+    });
   } catch (error) {
     console.error("Verify forgot password OTP error:", error);
     res.status(500).json({ message: "Internal server error." });
@@ -392,19 +436,29 @@ export const resetPassword = async (req, res) => {
   const { email, newPassword } = req.body;
 
   if (!email || !newPassword) {
-    return res.status(400).json({ message: "Email and new password are required." });
+    return res
+      .status(400)
+      .json({ message: "Email and new password are required." });
   }
 
   try {
     // Check if they verified the OTP first
-    const otpRecord = await OTP.findOne({ email: email.toLowerCase(), purpose: "forgot-password" });
+    const otpRecord = await OTP.findOne({
+      email: email.toLowerCase(),
+      purpose: "forgot-password",
+    });
     if (!otpRecord || !otpRecord.verified) {
-      return res.status(400).json({ message: "Password reset request unauthorized. Please verify OTP first." });
+      return res.status(400).json({
+        message:
+          "Password reset request unauthorized. Please verify OTP first.",
+      });
     }
 
     // Check expiration of OTP
     if (new Date() > otpRecord.expiresAt) {
-      return res.status(400).json({ message: "Reset code has expired. Please verify OTP again." });
+      return res
+        .status(400)
+        .json({ message: "Reset code has expired. Please verify OTP again." });
     }
 
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -423,7 +477,9 @@ export const resetPassword = async (req, res) => {
     // Delete OTP record immediately after successful reset
     await OTP.deleteOne({ _id: otpRecord._id });
 
-    res.status(200).json({ message: "Password updated successfully. You can now login." });
+    res
+      .status(200)
+      .json({ message: "Password updated successfully. You can now login." });
   } catch (error) {
     console.error("Reset password error:", error);
     res.status(500).json({ message: "Internal server error." });
