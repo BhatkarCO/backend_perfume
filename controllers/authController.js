@@ -11,6 +11,37 @@ dotenv.config();
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretscentoraauthkey";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
 
+const getCookieOptions = () => {
+  const isProduction = process.env.NODE_ENV === "production";
+  const secure =
+    process.env.COOKIE_SECURE === "true" ||
+    (process.env.COOKIE_SECURE === undefined && isProduction);
+  const sameSiteValue = (
+    process.env.COOKIE_SAMESITE || (secure ? "None" : "Lax")
+  ).toLowerCase();
+
+  const sameSite =
+    sameSiteValue === "none"
+      ? "None"
+      : sameSiteValue === "strict"
+        ? "Strict"
+        : "Lax";
+
+  const options = {
+    httpOnly: true,
+    secure,
+    sameSite,
+    path: "/",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  };
+
+  if (process.env.COOKIE_DOMAIN) {
+    options.domain = process.env.COOKIE_DOMAIN;
+  }
+
+  return options;
+};
+
 /**
  * Register User
  */
@@ -130,13 +161,7 @@ export const login = async (req, res) => {
       },
     );
 
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "None",
-      path: "/",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    res.cookie("token", token, getCookieOptions());
 
     res.status(200).json({
       message: "Login successful.",
@@ -229,13 +254,7 @@ export const verifyOTP = async (req, res) => {
       },
     );
 
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "None",
-      path: "/",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    res.cookie("token", token, getCookieOptions());
 
     res.status(200).json({
       message: "Email verified successfully.",
@@ -509,11 +528,7 @@ export const getCurrentUser = async (req, res) => {
 
 //logout user and clear the token cookie
 export const logout = (req, res) => {
-  res.clearCookie("token", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "None",
-  });
+  res.clearCookie("token", getCookieOptions());
 
   res.status(200).json({
     message: "Logged out successfully.",

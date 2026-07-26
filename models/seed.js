@@ -16,6 +16,7 @@ import InventoryLog from './InventoryLog.js';
 import NewsletterSubscriber from './NewsletterSubscriber.js';
 import ContactMessage from './ContactMessage.js';
 
+
 dotenv.config();
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/bhatkarbase';
