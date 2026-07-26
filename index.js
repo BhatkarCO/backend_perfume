@@ -48,14 +48,18 @@ const allowedOrigins = [
 const corsOptions = {
   origin: (origin, callback) => {
     // Allow requests with no Origin (Postman, server-to-server)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      return callback(null, true);
+    }
 
+    // Allow only whitelisted origins
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
     return callback(new Error("Not allowed by CORS"));
   },
+
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],

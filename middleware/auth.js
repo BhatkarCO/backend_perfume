@@ -10,11 +10,6 @@ const JWT_SECRET = process.env.JWT_SECRET || "supersecretscentoraauthkey";
  * Verify JWT token middleware
  */
 export const verifyToken = async (req, res, next) => {
-  console.log("========== VERIFY TOKEN ==========");
-  console.log("Cookie Header:", req.headers.cookie);
-  console.log("Cookies Object:", req.cookies);
-  console.log("Origin:", req.headers.origin);
-  console.log("Host:", req.headers.host);
 
   const token = req.cookies.token;
 

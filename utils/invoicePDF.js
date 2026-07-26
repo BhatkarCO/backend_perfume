@@ -19,35 +19,64 @@ export const drawInvoicePDF = (doc, order, items) => {
     .fillColor(GOLD)
     .fontSize(26)
     .font("Helvetica-Bold")
-    .text("BHATKAR PERFUMES", 50, 45)
+    .text("BHATKAR CO PERFUMES", 50, 45)
     .fontSize(10)
     .fillColor(DARK)
     .text("HOUSE OF PREMIUM LUXURY PERFUMES", 50, 75)
     .font("Helvetica")
     .fillColor(GREY)
-    .text("Web: www.bhatkar-perfumes.com", 50, 90)
-    .text("Support: support@bhatkar-perfumes.com", 50, 102);
+    .text("Web: www.bhatkarco.com", 50, 90)
+    .text("Support: support@bhatkarco.com", 50, 102);
 
   // Invoice Meta
+  // Invoice Meta
+  const metaX = 340;
+  const metaWidth = 210;
+  let metaY = 45;
+
   doc
     .fillColor(DARK)
-    .fontSize(16)
     .font("Helvetica-Bold")
-    .text("INVOICE", 400, 45, { align: "right" })
-    .font("Helvetica")
-    .fontSize(10)
-    .fillColor(GREY)
-    .text(`Invoice ID: #INV-${order.id}`, 400, 65, { align: "right" })
-    .text(`Order ID: #${order.id}`, 400, 78, { align: "right" })
-    .text(
-      `Date: ${new Date(order.created_at).toLocaleDateString("en-IN")}`,
-      400,
-      91,
-      { align: "right" },
-    )
-    .text(`Status: ${order.status.toUpperCase()}`, 400, 104, {
+    .fontSize(16)
+    .text("INVOICE", metaX, metaY, {
+      width: metaWidth,
       align: "right",
     });
+
+  metaY += 28;
+
+  doc.font("Helvetica").fontSize(10).fillColor(GREY);
+
+  doc.text(`Invoice ID: #INV-${order.id}`, metaX, metaY, {
+    width: metaWidth,
+    align: "right",
+  });
+
+  metaY += 16;
+
+  doc.text(`Order ID: #${order.id}`, metaX, metaY, {
+    width: metaWidth,
+    align: "right",
+  });
+
+  metaY += 16;
+
+  doc.text(
+    `Date: ${new Date(order.created_at).toLocaleDateString("en-IN")}`,
+    metaX,
+    metaY,
+    {
+      width: metaWidth,
+      align: "right",
+    },
+  );
+
+  metaY += 16;
+
+  doc.text(`Status: ${order.status.toUpperCase()}`, metaX, metaY, {
+    width: metaWidth,
+    align: "right",
+  });
 
   // Horizontal divider line
   doc
@@ -84,14 +113,25 @@ export const drawInvoicePDF = (doc, order, items) => {
   doc
     .fillColor(DARK)
     .font("Helvetica-Bold")
+    .fontSize(10)
     .text("PAYMENT DETAILS", 360, 160)
     .font("Helvetica")
-    .fillColor(GREY)
-    .text(`Razorpay Payment ID:`, 360, 178)
-    .fontSize(8)
-    .text(order.razorpay_payment_id || "N/A", 360, 190)
-    .fontSize(10)
-    .text(`Method: Digital Payment / Razorpay`, 360, 205);
+    .fillColor(GREY);
+
+  if (order.payment_method === "COD") {
+    doc
+      .text("Payment Method:", 360, 178)
+      .text("Cash on Delivery (COD)", 360, 190)
+      .text(`Payment Status: ${order.payment_status}`, 360, 205)
+      .text("Payment ID: N/A", 360, 220);
+  } else {
+    doc
+      .text("Payment Method:", 360, 178)
+      .text("Razorpay", 360, 190)
+      .text(`Payment Status: ${order.payment_status}`, 360, 205)
+      .fontSize(8)
+      .text(`Payment ID: ${order.razorpay_payment_id || "N/A"}`, 360, 220);
+  }
 
   // Table Header
   let tableY = 260;

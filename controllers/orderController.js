@@ -26,10 +26,7 @@ export const validateCouponCode = async (code, subtotal) => {
   const coupon = await Coupon.findOne({
     code: code.toUpperCase(),
     active: true,
-    $or: [
-      { expires_at: null },
-      { expires_at: { $gt: new Date() } }
-    ]
+    $or: [{ expires_at: null }, { expires_at: { $gt: new Date() } }],
   });
 
   if (!coupon) {
@@ -84,7 +81,7 @@ export const applyCoupon = async (req, res) => {
  */
 export const createOrder = async (req, res) => {
   const userId = req.user.id;
-  const { items, shippingAddressId, couponCode } = req.body; // items: [{ productId, quantity }]
+  const { items, shippingAddressId, couponCode, paymentMethod } = req.body; // items: [{ productId, quantity }]
 
   if (!items || items.length === 0 || !shippingAddressId) {
     return res
@@ -94,17 +91,20 @@ export const createOrder = async (req, res) => {
 
   try {
     // 1. Fetch address details
-    const address = await Address.findOne({ _id: shippingAddressId, user_id: userId });
+    const address = await Address.findOne({
+      _id: shippingAddressId,
+      user_id: userId,
+    });
     if (!address) {
       return res.status(400).json({ message: "Invalid shipping address." });
     }
 
     // 2. Fetch products and calculate total cost in a single batch query
-    const productIds = items.map(item => item.productId);
+    const productIds = items.map((item) => item.productId);
     const products = await Product.find({ _id: { $in: productIds } }).lean();
 
     const productMap = {};
-    products.forEach(p => {
+    products.forEach((p) => {
       productMap[p._id.toString()] = p;
     });
 
@@ -120,11 +120,9 @@ export const createOrder = async (req, res) => {
       }
 
       if (product.stock_quantity < item.quantity) {
-        return res
-          .status(400)
-          .json({
-            message: `Insufficient stock for product ${product.name}. Available: ${product.stock_quantity}`,
-          });
+        return res.status(400).json({
+          message: `Insufficient stock for product ${product.name}. Available: ${product.stock_quantity}`,
+        });
       }
 
       const activePrice = product.sale_price
@@ -157,20 +155,49 @@ export const createOrder = async (req, res) => {
     // 4. Create local order record in 'Pending' status
     const newOrder = new Order({
       user_id: userId,
-      status: 'Pending',
+
+      status: "Pending",
+
+      payment_method: paymentMethod,
+      payment_status: "Pending",
+
       total_amount: totalAmount,
+
       discount_amount: discount,
+
       coupon_code: validCouponCode,
+
       shipping_address_id: shippingAddressId,
-      items: itemsWithPrice.map(item => ({
+
+      items: itemsWithPrice.map((item) => ({
         product_id: item.product_id,
         quantity: item.quantity,
-        price_at_purchase: item.price_at_purchase
-      }))
+        price_at_purchase: item.price_at_purchase,
+      })),
     });
 
     await newOrder.save();
     const localOrderId = newOrder.id;
+
+    // ===========================
+    // CASH ON DELIVERY FLOW
+    // ===========================
+    if (paymentMethod === "COD") {
+      newOrder.status = "Pending";
+      newOrder.payment_status = "Pending";
+
+      await newOrder.save();
+
+      return res.status(201).json({
+        success: true,
+        paymentMethod: "COD",
+        orderId: localOrderId,
+        amount: totalAmount,
+        shipping,
+        discount,
+        subtotal,
+      });
+    }
 
     // 5. Integrate with Razorpay (Create Razorpay Order)
     let rzpOrder = null;
@@ -264,7 +291,8 @@ export const verifyPayment = async (req, res) => {
     }
 
     // 3. Confirm order & register payment in database
-    order.status = 'Confirmed';
+    order.status = "Confirmed";
+    order.payment_status = "Paid";
     order.razorpay_payment_id = razorpayPaymentId;
     await order.save();
 
@@ -272,21 +300,21 @@ export const verifyPayment = async (req, res) => {
       order_id: orderId,
       razorpay_payment_id: razorpayPaymentId,
       amount: order.total_amount,
-      status: 'captured',
-      method: 'digital'
+      status: "captured",
+      method: "digital",
     });
     await payment.save();
 
     // 4. Update inventory and log stock removal
     for (const item of order.items) {
       await Product.findByIdAndUpdate(item.product_id, {
-        $inc: { stock_quantity: -item.quantity }
+        $inc: { stock_quantity: -item.quantity },
       });
 
       const log = new InventoryLog({
         product_id: item.product_id,
         change_amount: -item.quantity,
-        reason: `Purchase - Order #${orderId}`
+        reason: `Purchase - Order #${orderId}`,
       });
       await log.save();
     }
@@ -324,9 +352,9 @@ export const verifyPayment = async (req, res) => {
     // 6. Send invoice via Resend
     try {
       const populatedOrder = await Order.findById(orderId)
-        .populate('user_id')
-        .populate('shipping_address_id')
-        .populate('items.product_id');
+        .populate("user_id")
+        .populate("shipping_address_id")
+        .populate("items.product_id");
 
       const fullOrder = {
         ...populatedOrder.toObject(),
@@ -338,13 +366,13 @@ export const verifyPayment = async (req, res) => {
         state: populatedOrder.shipping_address_id?.state,
         postal_code: populatedOrder.shipping_address_id?.postal_code,
         shipping_phone: populatedOrder.shipping_address_id?.phone,
-        country: populatedOrder.shipping_address_id?.country
+        country: populatedOrder.shipping_address_id?.country,
       };
 
-      const fullItems = populatedOrder.items.map(item => ({
+      const fullItems = populatedOrder.items.map((item) => ({
         quantity: item.quantity,
         price_at_purchase: item.price_at_purchase,
-        name: item.product_id?.name
+        name: item.product_id?.name,
       }));
 
       await sendInvoiceEmail(fullOrder, fullItems);
@@ -369,12 +397,14 @@ export const getUserOrders = async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const orders = await Order.find({ user_id: userId }).sort({ created_at: -1 }).lean();
+    const orders = await Order.find({ user_id: userId })
+      .sort({ created_at: -1 })
+      .lean();
 
-    const formattedOrders = orders.map(o => ({
+    const formattedOrders = orders.map((o) => ({
       ...o,
       id: o._id.toString(),
-      total_items: o.items.length
+      total_items: o.items.length,
     }));
 
     res.status(200).json(formattedOrders);
@@ -393,15 +423,15 @@ export const getOrderById = async (req, res) => {
 
   try {
     const order = await Order.findOne({ _id: orderId, user_id: userId })
-      .populate('shipping_address_id')
-      .populate('items.product_id');
+      .populate("shipping_address_id")
+      .populate("items.product_id");
 
     if (!order) {
       return res.status(404).json({ message: "Order not found." });
     }
 
     const oObj = order.toObject();
-    
+
     // Format flat shipping address properties for backward compatibility
     oObj.address_line1 = order.shipping_address_id?.address_line1;
     oObj.address_line2 = order.shipping_address_id?.address_line2;
@@ -412,18 +442,20 @@ export const getOrderById = async (req, res) => {
     oObj.country = order.shipping_address_id?.country;
 
     // Format items to expected structure
-    oObj.items = order.items.map(item => {
+    oObj.items = order.items.map((item) => {
       const prod = item.product_id;
-      const primaryImage = prod?.images?.find(img => img.is_primary)?.image_url 
-        || (prod?.images?.[0]?.image_url || null);
-      
+      const primaryImage =
+        prod?.images?.find((img) => img.is_primary)?.image_url ||
+        prod?.images?.[0]?.image_url ||
+        null;
+
       return {
         product_id: prod?._id,
         name: prod?.name,
         slug: prod?.slug,
         quantity: item.quantity,
         price_at_purchase: item.price_at_purchase,
-        primary_image: primaryImage
+        primary_image: primaryImage,
       };
     });
 
@@ -444,15 +476,18 @@ export const downloadInvoice = async (req, res) => {
 
   try {
     const orderObj = await Order.findById(orderId)
-      .populate('user_id')
-      .populate('shipping_address_id')
-      .populate('items.product_id');
+      .populate("user_id")
+      .populate("shipping_address_id")
+      .populate("items.product_id");
 
     if (!orderObj) {
       return res.status(404).json({ message: "Order or invoice not found." });
     }
 
-    if (userRole !== "admin" && orderObj.user_id?._id.toString() !== userId.toString()) {
+    if (
+      userRole !== "admin" &&
+      orderObj.user_id?._id.toString() !== userId.toString()
+    ) {
       return res.status(403).json({ message: "Unauthorized action." });
     }
 
@@ -466,13 +501,13 @@ export const downloadInvoice = async (req, res) => {
       state: orderObj.shipping_address_id?.state,
       postal_code: orderObj.shipping_address_id?.postal_code,
       shipping_phone: orderObj.shipping_address_id?.phone,
-      country: orderObj.shipping_address_id?.country
+      country: orderObj.shipping_address_id?.country,
     };
 
-    const items = orderObj.items.map(item => ({
+    const items = orderObj.items.map((item) => ({
       quantity: item.quantity,
       price_at_purchase: item.price_at_purchase,
-      name: item.product_id?.name
+      name: item.product_id?.name,
     }));
 
     // Generate PDF using PDFKit
