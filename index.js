@@ -42,6 +42,7 @@ app.use(helmet({
 
 const allowedOrigins = [
   "https://frontend-perfume-eight.vercel.app",
+  "http://localhost:3000",
   //"https://bhatkarco.com",
 ];
 
