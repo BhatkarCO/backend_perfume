@@ -35,19 +35,8 @@ const getCookieOptions = () => {
     maxAge: 7 * 24 * 60 * 60 * 1000,
   };
 
-  const rawDomain = process.env.COOKIE_DOMAIN?.trim();
-  if (rawDomain) {
-    try {
-      const normalizedDomain = rawDomain.includes("://")
-        ? new URL(rawDomain).hostname
-        : rawDomain.replace(/\/+$/, "").split(":")[0];
-
-      if (normalizedDomain) {
-        options.domain = normalizedDomain;
-      }
-    } catch {
-      console.warn("Invalid COOKIE_DOMAIN provided; ignoring it.");
-    }
+  if (process.env.COOKIE_DOMAIN) {
+    options.domain = process.env.COOKIE_DOMAIN;
   }
 
   return options;
