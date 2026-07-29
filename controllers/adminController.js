@@ -66,14 +66,16 @@ export const addProduct = async (req, res) => {
     if (req.files && req.files.length > 0) {
       for (let i = 0; i < req.files.length; i++) {
         const file = req.files[i];
-        const uploadedUrl = await uploadAsset(
+        const uploadedImage = await uploadAsset(
           file.buffer,
           file.originalname,
           file.mimetype,
         );
-        images.push({
-          image_url: uploadedUrl,
-          is_primary: i === 0,
+
+        product.images.push({
+          image_url: uploadedImage.image_url,
+          public_id: uploadedImage.public_id,
+          is_primary: setPrimary,
         });
       }
     }
@@ -132,6 +134,7 @@ export const editProduct = async (req, res) => {
     is_best_selling,
     is_new_arrival,
     fragrance_notes,
+    deletedImages,
   } = req.body;
 
   try {
@@ -220,21 +223,40 @@ export const editProduct = async (req, res) => {
       await log.save();
     }
 
+    // Remove deleted images
+    if (deletedImages) {
+      const deleted =
+        typeof deletedImages === "string"
+          ? JSON.parse(deletedImages)
+          : deletedImages;
+
+      console.log("Deleted Array:", deleted);
+
+      product.images = product.images.filter(
+        (img) => !deleted.includes(img.image_url),
+      );
+
+      console.log(
+        "Remaining Images:",
+        product.images.map((img) => img.image_url),
+      );
+    }
+
     // Process new images if uploaded
     if (req.files && req.files.length > 0) {
       const hasPrimary = product.images.some((img) => img.is_primary);
       for (let i = 0; i < req.files.length; i++) {
         const file = req.files[i];
-        const uploadedUrl = await uploadAsset(
+        const uploadedImage = await uploadAsset(
           file.buffer,
           file.originalname,
           file.mimetype,
         );
 
-        const setPrimary = !hasPrimary && i === 0;
         product.images.push({
-          image_url: uploadedUrl,
-          is_primary: setPrimary,
+          image_url: uploadedImage.image_url,
+          public_id: uploadedImage.public_id,
+          is_primary: product.images.length === 0,
         });
       }
     }
@@ -685,7 +707,8 @@ export const forgotAdminPassword = async (req, res) => {
     await sendOTPEmail(admin.email, otp);
 
     res.json({
-      message: "If an admin account exists for this email, an OTP has been sent.",
+      message:
+        "If an admin account exists for this email, an OTP has been sent.",
     });
   } catch (error) {
     console.error(error);

@@ -38,11 +38,18 @@ export const uploadAsset = async (fileBuffer, fileName, mimeType) => {
   let processedMimeType = mimeType;
 
   // Convert JPG, JPEG, and PNG images to WebP
-  if (mimeType && (mimeType === "image/jpeg" || mimeType === "image/png" || mimeType === "image/jpg")) {
+  if (
+    mimeType &&
+    (mimeType === "image/jpeg" ||
+      mimeType === "image/png" ||
+      mimeType === "image/jpg")
+  ) {
     try {
-      processedBuffer = await sharp(fileBuffer).webp({ quality: 80 }).toBuffer();
+      processedBuffer = await sharp(fileBuffer)
+        .webp({ quality: 80 })
+        .toBuffer();
       processedMimeType = "image/webp";
-      
+
       const ext = path.extname(fileName);
       if (ext) {
         processedFileName = fileName.slice(0, -ext.length) + ".webp";
@@ -71,7 +78,10 @@ export const uploadAsset = async (fileBuffer, fileName, mimeType) => {
               console.error("Cloudinary stream upload error:", error);
               return reject(error);
             }
-            resolve(result.secure_url);
+            resolve({
+              image_url: result.secure_url,
+              public_id: result.public_id,
+            });
           },
         );
         uploadStream.end(processedBuffer);
