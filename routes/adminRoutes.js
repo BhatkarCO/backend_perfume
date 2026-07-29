@@ -1,8 +1,10 @@
-import express from 'express';
+import express from "express";
 import {
   addProduct,
   editProduct,
   deleteProduct,
+  getProductReviewsAdmin,
+  deleteReview,
   getAdminOrders,
   updateOrderStatus,
   getAdminUsers,
@@ -10,9 +12,9 @@ import {
   getAdminReports,
   forgotAdminPassword,
   resetAdminPassword,
-} from '../controllers/adminController.js';
-import { verifyToken, isAdmin } from '../middleware/auth.js';
-import upload from '../middleware/upload.js';
+} from "../controllers/adminController.js";
+import { verifyToken, isAdmin } from "../middleware/auth.js";
+import upload from "../middleware/upload.js";
 
 const router = express.Router();
 
@@ -24,19 +26,23 @@ router.post("/reset-password", resetAdminPassword);
 router.use(verifyToken, isAdmin);
 
 // Products
-router.post('/products', upload.array('images', 10), addProduct);
-router.put('/products/:id', upload.array('images', 10), editProduct);
-router.delete('/products/:id', deleteProduct);
+router.post("/products", upload.array("images", 10), addProduct);
+router.put("/products/:id", upload.array("images", 10), editProduct);
+router.delete("/products/:id", deleteProduct);
+
+router.get("/products/:productId/reviews", getProductReviewsAdmin);
+
+router.delete("/reviews/:reviewId", deleteReview);
 
 // Orders
-router.get('/orders', getAdminOrders);
-router.put('/orders/:orderId/status', updateOrderStatus);
+router.get("/orders", getAdminOrders);
+router.put("/orders/:orderId/status", updateOrderStatus);
 
 // Customers
-router.get('/users', getAdminUsers);
-router.put('/users/:userId/block', toggleBlockUser);
+router.get("/users", getAdminUsers);
+router.put("/users/:userId/block", toggleBlockUser);
 
 // Analytics Reports
-router.get('/reports', getAdminReports);
+router.get("/reports", getAdminReports);
 
 export default router;

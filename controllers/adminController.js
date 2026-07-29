@@ -1,3 +1,4 @@
+import Review from "../models/Review.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
 import User from "../models/User.js";
@@ -230,15 +231,8 @@ export const editProduct = async (req, res) => {
           ? JSON.parse(deletedImages)
           : deletedImages;
 
-      console.log("Deleted Array:", deleted);
-
       product.images = product.images.filter(
         (img) => !deleted.includes(img.image_url),
-      );
-
-      console.log(
-        "Remaining Images:",
-        product.images.map((img) => img.image_url),
       );
     }
 
@@ -287,6 +281,74 @@ export const deleteProduct = async (req, res) => {
   } catch (error) {
     console.error("Delete product error:", error);
     res.status(500).json({ message: "Error deleting product." });
+  }
+};
+
+export const getProductReviewsAdmin = async (req, res) => {
+  try {
+    const { productId } = req.params;
+
+    const reviews = await Review.find({
+      product_id: productId,
+    })
+      .populate("user_id", "name email")
+      .sort({ created_at: -1 })
+      .lean();
+
+    res.status(200).json(reviews);
+  } catch (error) {
+    console.error("Get reviews error:", error);
+    res.status(500).json({
+      message: "Failed to fetch reviews.",
+    });
+  }
+};
+
+export const deleteReview = async (req, res) => {
+  try {
+    console.log("==== DELETE REVIEW START ====");
+
+    const { reviewId } = req.params;
+
+    const review = await Review.findById(reviewId);
+
+    if (!review) {
+      return res.status(404).json({
+        message: "Review not found.",
+      });
+    }
+
+    await Review.findByIdAndDelete(reviewId);
+
+    const avg = await Review.aggregate([
+      {
+        $match: {
+          product_id: review.product_id,
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          avgRating: {
+            $avg: "$rating",
+          },
+        },
+      },
+    ]);
+
+    await Product.findByIdAndUpdate(review.product_id, {
+      rating: avg.length ? Number(avg[0].avgRating.toFixed(2)) : 0,
+    });
+
+    return res.status(200).json({
+      message: "Review deleted successfully.",
+    });
+  } catch (err) {
+    console.error("DELETE REVIEW ERROR:", err);
+
+    return res.status(500).json({
+      message: err.message,
+    });
   }
 };
 
