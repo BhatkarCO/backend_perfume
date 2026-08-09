@@ -3,7 +3,7 @@ import axios from "axios";
 export const chatWithAI = async (req, res) => {
   try {
     const response = await axios.post(
-      "https://https://chat-bot-5i2f.onrender.com/chat",
+      "https://chat-bot-5i2f.onrender.com/chat",
       req.body,
     );
 
