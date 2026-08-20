@@ -31,6 +31,14 @@ const productSchema = new mongoose.Schema(
     short_description: { type: String },
     price: { type: Number, required: true },
     sale_price: { type: Number },
+    delivery_charge: {
+      type: Number,
+      default: 40,
+    },
+    gst_percentage: {
+      type: Number,
+      default: 18,
+    },
     stock_quantity: { type: Number, default: 0 },
     category_id: { type: mongoose.Schema.Types.ObjectId, ref: "Category" },
     gender: { type: String, enum: ["Men", "Women", "Unisex"] },

@@ -7,6 +7,9 @@ export const chatWithAI = async (req, res) => {
       req.body,
     );
 
+    console.log("===== AI SERVICE RESPONSE =====");
+    console.log(JSON.stringify(response.data, null, 2));
+
     res.status(200).json(response.data);
   } catch (error) {
     console.error("===== AI SERVICE ERROR =====");

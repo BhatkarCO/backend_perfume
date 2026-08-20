@@ -1,0 +1,422 @@
+﻿diff --git a/controllers/orderController.js b/controllers/orderController.js
+index 2c2ae2c..825832e 100644
+--- a/controllers/orderController.js
++++ b/controllers/orderController.js
+@@ -4,6 +4,14 @@ import Order from "../models/Order.js";
+ import Product from "../models/Product.js";
+ import Address from "../models/Address.js";
+ import Coupon from "../models/Coupon.js";
++import { calculateFinalAmount, calculateGST } from "../utils/pricing.js";
++import {
++  checkServiceability,
++  createShiprocketOrder,
++  assignShiprocketAwb,
++  generateShiprocketPickup,
++  SHIPROCKET_CONFIG,
++} from "../config/shiprocket.js";
+ import Payment from "../models/Payment.js";
+ import User from "../models/User.js";
+ import InventoryLog from "../models/InventoryLog.js";
+@@ -12,11 +20,6 @@ import { sendEmail } from "../utils/email.js";
+ import { drawInvoicePDF } from "../utils/invoicePDF.js";
+ import { sendInvoiceEmail } from "../utils/resendEmail.js";
+ 
+-// Shipping logic: Free for order >= 1500, else 99
+-const calculateShipping = (subtotal) => {
+-  return subtotal >= 1500 ? 0.0 : 99.0;
+-};
+-
+ /**
+  * Validate Coupon
+  */
+@@ -76,6 +79,219 @@ export const applyCoupon = async (req, res) => {
+   }
+ };
+ 
++const formatShiprocketAddressLine = (address) => {
++  return `${address.address_line1}${address.address_line2 ? `, ${address.address_line2}` : ""}`;
++};
++
++const buildShiprocketOrderPayload = ({
++  localOrderId,
++  user,
++  address,
++  items,
++  subtotal,
++  shippingCharge,
++  paymentMethod,
++}) => {
++  return {
++    order_id: localOrderId,
++    order_date: new Date().toISOString(),
++    pickup_location: SHIPROCKET_CONFIG.pickupLocation,
++    pickup_postcode: SHIPROCKET_CONFIG.pickupPostcode,
++    billing_customer_name: user.name || "Customer",
++    billing_last_name: "",
++    billing_address: formatShiprocketAddressLine(address),
++    billing_city: address.city,
++    billing_pincode: address.postal_code,
++    billing_state: address.state,
++    billing_country: address.country || "India",
++    billing_email: user.email,
++    billing_phone: address.phone,
++    shipping_is_billing: false,
++    shipping_customer_name: user.name || "Customer",
++    shipping_address: formatShiprocketAddressLine(address),
++    shipping_city: address.city,
++    shipping_pincode: address.postal_code,
++    shipping_state: address.state,
++    shipping_country: address.country || "India",
++    shipping_email: user.email,
++    shipping_phone: address.phone,
++    order_items: items.map((item) => {
++      const itemTax = calculateGST(item.price_at_purchase * item.quantity);
++      return {
++        name: item.name,
++        sku: item.product_id?.toString() || item.product_id,
++        units: item.quantity,
++        selling_price: item.price_at_purchase,
++        discount: 0,
++        tax: itemTax,
++        hsn: "3304",
++        brand: "Bhatkar Perfumes",
++      };
++    }),
++    payment_method: paymentMethod === "COD" ? "COD" : "Prepaid",
++    sub_total: subtotal,
++    shipping_charges: shippingCharge,
++    length: SHIPROCKET_CONFIG.defaultDimensions.length,
++    breadth: SHIPROCKET_CONFIG.defaultDimensions.breadth,
++    height: SHIPROCKET_CONFIG.defaultDimensions.height,
++    weight: Math.max(
++      SHIPROCKET_CONFIG.defaultWeight,
++      items.reduce(
++        (sum, item) => sum + item.quantity * SHIPROCKET_CONFIG.defaultWeight,
++        0,
++      ),
++    ),
++    delivery_postcode: address.postal_code,
++  };
++};
++
++const registerShiprocketShipment = async ({
++  order,
++  user,
++  address,
++  items,
++  subtotal,
++  shippingCharge,
++  paymentMethod,
++}) => {
++  if (order.shiprocket_shipment_id) {
++    console.warn(
++      "Shiprocket registration skipped because order already has shiprocket_shipment_id:",
++      order.shiprocket_shipment_id,
++    );
++    return order;
++  }
++
++  try {
++    const enrichedItems = await Promise.all(
++      items.map(async (item) => {
++        if (item.name) return item;
++
++        if (!item.product_id) {
++          return item;
++        }
++
++        const product = await Product.findById(item.product_id).lean();
++        return {
++          ...item,
++          name: product?.name || `Product ${item.product_id}`,
++        };
++      }),
++    );
++
++    const payload = buildShiprocketOrderPayload({
++      localOrderId: order.id,
++      user,
++      address,
++      items: enrichedItems,
++      subtotal,
++      shippingCharge,
++      paymentMethod,
++    });
++
++    let createResponse;
++    try {
++      createResponse = await createShiprocketOrder(payload);
++    } catch (error) {
++      const errorData = error.response?.data || error.data || null;
++      const candidateLocations =
++        errorData?.data || errorData?.data?.data || null;
++      const fallbackPickupLocation = Array.isArray(candidateLocations)
++        ? candidateLocations[0]?.pickup_location
++        : null;
++
++      if (
++        errorData?.message?.includes("Wrong Pickup location entered") &&
++        fallbackPickupLocation
++      ) {
++        console.warn(
++          "Shiprocket pickup location invalid, retrying with:",
++          fallbackPickupLocation,
++        );
++        payload.pickup_location = fallbackPickupLocation;
++        createResponse = await createShiprocketOrder(payload);
++      } else {
++        throw error;
++      }
++    }
++
++    const shipmentId =
++      createResponse.shipment_id || createResponse.data?.shipment_id;
++    const shiprocketOrderId =
++      createResponse.order_id ||
++      createResponse.data?.order_id ||
++      createResponse.data?.order_id;
++
++    if (!shipmentId) {
++      // Log payload and full response for debugging when Shiprocket doesn't return shipment_id
++      try {
++        console.error(
++          "Shiprocket create order payload:",
++          JSON.stringify(payload, null, 2),
++        );
++      } catch (e) {
++        console.error("Shiprocket create order payload (stringify failed)", e);
++      }
++      try {
++        console.error(
++          "Shiprocket create response:",
++          JSON.stringify(createResponse, null, 2),
++        );
++      } catch (e) {
++        console.error(
++          "Shiprocket create response (stringify failed)",
++          createResponse,
++        );
++      }
++
++      throw new Error("Shiprocket did not return a shipment_id.");
++    }
++
++    order.shiprocket_order_id = shiprocketOrderId;
++    order.shiprocket_shipment_id = shipmentId;
++    order.shiprocket_status = "Created";
++    await order.save();
++
++    const assignRequest = {
++      shipment_id: shipmentId,
++      courier_id: order.courier?.courier_company_id,
++    };
++    console.debug("Shiprocket assign AWB request:", assignRequest);
++
++    const assignResponse = await assignShiprocketAwb(assignRequest);
++    const awbCode =
++      assignResponse.awb_code ||
++      assignResponse.data?.awb_code ||
++      assignResponse.data?.awb_number ||
++      assignResponse.data?.data?.awb_code;
++
++    if (!awbCode) {
++      console.error(
++        "Shiprocket assign AWB response missing awb_code:",
++        JSON.stringify(assignResponse, null, 2),
++      );
++      order.shiprocket_status = "AWB_ASSIGN_FAILED";
++      await order.save();
++      throw new Error("AWB not Assigned");
++    }
++
++    await generateShiprocketPickup({ shipment_id: shipmentId });
++
++    order.shiprocket_awb = awbCode;
++    order.shiprocket_courier_name = order.courier?.courier_name;
++    order.shiprocket_status = awbCode ? "PickupScheduled" : "AWB_ASSIGNED";
++
++    await order.save();
++    return order;
++  } catch (error) {
++    console.error(
++      "Shiprocket shipment registration failed:",
++      error.response?.data || error.message,
++    );
++    return order;
++  }
++};
++
+ /**
+  * Create Order (Initiate checkout & Razorpay session)
+  */
+@@ -98,6 +314,37 @@ export const createOrder = async (req, res) => {
+     if (!address) {
+       return res.status(400).json({ message: "Invalid shipping address." });
+     }
++    // -----------------------------
++    // Get Shipping Charge
++    // -----------------------------
++
++    const serviceability = await checkServiceability({
++      pickupPostcode: process.env.SHIPROCKET_PICKUP_PIN,
++      deliveryPostcode: address.postal_code,
++      cod: paymentMethod === "COD" ? 1 : 0,
++      weight: 0.5,
++    });
++    console.log(JSON.stringify(serviceability, null, 2));
++
++    // -----------------------------
++    // Get Recommended Courier
++    // -----------------------------
++
++    const { available_courier_companies, shiprocket_recommended_courier_id } =
++      serviceability.data;
++
++    const recommendedCourier = available_courier_companies.find(
++      (courier) =>
++        courier.courier_company_id === shiprocket_recommended_courier_id,
++    );
++
++    if (!recommendedCourier) {
++      return res.status(400).json({
++        message: "No courier available for this address.",
++      });
++    }
++
++    const shippingCharge = Number(recommendedCourier.freight_charge);
+ 
+     // 2. Fetch products and calculate total cost in a single batch query
+     const productIds = items.map((item) => item.productId);
+@@ -149,8 +396,13 @@ export const createOrder = async (req, res) => {
+       }
+     }
+ 
+-    const shipping = calculateShipping(subtotal - discount);
+-    const totalAmount = subtotal - discount + shipping;
++    const pricing = calculateFinalAmount({
++      productPrice: subtotal,
++      shippingCharge,
++      discount,
++    });
++
++    const totalAmount = pricing.payable;
+ 
+     // 4. Create local order record in 'Pending' status
+     const newOrder = new Order({
+@@ -163,10 +415,18 @@ export const createOrder = async (req, res) => {
+ 
+       total_amount: totalAmount,
+ 
++      pricing,
++
+       discount_amount: discount,
+ 
+       coupon_code: validCouponCode,
+ 
++      courier: {
++        courier_company_id: recommendedCourier.courier_company_id,
++        courier_name: recommendedCourier.courier_name,
++        estimated_delivery_days: recommendedCourier.estimated_delivery_days,
++      },
++
+       shipping_address_id: shippingAddressId,
+ 
+       items: itemsWithPrice.map((item) => ({
+@@ -185,17 +445,36 @@ export const createOrder = async (req, res) => {
+     if (paymentMethod === "COD") {
+       newOrder.status = "Pending";
+       newOrder.payment_status = "Pending";
+-
+       await newOrder.save();
+ 
++      try {
++        const customer = await User.findById(userId);
++        if (customer) {
++          await registerShiprocketShipment({
++            order: newOrder,
++            user: customer,
++            address,
++            items: itemsWithPrice,
++            subtotal,
++            shippingCharge,
++            paymentMethod,
++          });
++        }
++      } catch (shipErr) {
++        console.error("COD Shiprocket registration failed:", shipErr);
++      }
++
+       return res.status(201).json({
+         success: true,
+         paymentMethod: "COD",
+         orderId: localOrderId,
+         amount: totalAmount,
+-        shipping,
++        pricing,
++        shippingCharge,
+         discount,
+         subtotal,
++        currency: "INR",
++        isMock: isMockMode(),
+       });
+     }
+ 
+@@ -229,7 +508,8 @@ export const createOrder = async (req, res) => {
+       orderId: localOrderId,
+       razorpayOrderId: rzpOrderId,
+       amount: totalAmount,
+-      shipping,
++      pricing,
++      shippingCharge,
+       discount,
+       subtotal,
+       currency: "INR",
+@@ -261,7 +541,13 @@ export const verifyPayment = async (req, res) => {
+     if (!order) {
+       return res.status(404).json({ message: "Order not found." });
+     }
+-
++    if (order.payment_status === "Paid") {
++      return res.status(200).json({
++        success: true,
++        message: "Payment already verified.",
++        orderId: order.id,
++      });
++    }
+     if (order.status !== "Pending") {
+       return res
+         .status(400)
+@@ -349,7 +635,32 @@ export const verifyPayment = async (req, res) => {
+       }
+     }
+ 
+-    // 6. Send invoice via Resend
++    // 6. Register with Shiprocket for prepaid orders only
++    if (order.payment_method !== "COD") {
++      try {
++        const address = await Address.findById(order.shipping_address_id);
++        if (customer && address) {
++          await registerShiprocketShipment({
++            order,
++            user: customer,
++            address,
++            items: order.items,
++            subtotal: order.pricing?.product_price || 0,
++            shippingCharge: order.pricing?.delivery_charges || 0,
++            paymentMethod: order.payment_method,
++          });
++        }
++      } catch (shipErr) {
++        console.error("Shiprocket registration after payment failed:", shipErr);
++      }
++    } else {
++      console.debug(
++        "Skipping Shiprocket registration in verifyPayment for COD order",
++        orderId,
++      );
++    }
++
++    // 7. Send invoice via Resend
+     try {
+       const populatedOrder = await Order.findById(orderId)
+         .populate("user_id")

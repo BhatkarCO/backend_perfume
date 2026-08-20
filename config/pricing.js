@@ -1,0 +1,1 @@
+export const GST_PERCENTAGE = 18;

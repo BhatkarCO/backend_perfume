@@ -1,10 +1,5 @@
 import PDFDocument from "pdfkit";
 
-// Shipping logic: Free for order >= 1500, else 99
-const calculateShipping = (subtotal) => {
-  return subtotal >= 1500 ? 0.0 : 99.0;
-};
-
 /**
  * Shared drawing logic for invoice PDF
  */
@@ -173,46 +168,104 @@ export const drawInvoicePDF = (doc, order, items) => {
     doc.moveTo(50, itemY).lineTo(550, itemY).strokeColor("#F0F0F0").stroke();
   });
 
-  // Summary calculation
-  const discount = parseFloat(order.discount_amount);
-  const total = parseFloat(order.total_amount);
-  const subtotal = total + discount - calculateShipping(total + discount);
-  const shipping = calculateShipping(total + discount);
+  // ===============================
+  // INVOICE SUMMARY
+  // ===============================
 
+  const pricing = order.pricing || {};
+
+  const subtotal = Number(
+    pricing.product_price ??
+      items.reduce(
+        (sum, item) =>
+          sum +
+          Number(item.price_at_purchase || 0) * Number(item.quantity || 0),
+        0,
+      ),
+  );
+
+  const gst = Number(pricing.gst_amount ?? pricing.gst ?? 0);
+
+  const shipping = Number(
+    pricing.delivery_charges ??
+      pricing.delivery_charge ??
+      pricing.shippingCharge ??
+      pricing.shipping_charges ??
+      pricing.shipping_charge ??
+      0,
+  );
+
+  const discount = Number(pricing.discount ?? order.discount_amount ?? 0);
+
+  const total = Number(
+    order.total_amount ??
+      pricing.payable ??
+      subtotal + gst + shipping - discount,
+  );
+
+  // Subtotal
   itemY += 15;
+
   doc
     .font("Helvetica")
+    .fontSize(10)
     .fillColor(GREY)
     .text("Subtotal:", 380, itemY)
-    .text(`₹${subtotal.toFixed(2)}`, 480, itemY, { align: "right" });
+    .text(`₹${subtotal.toFixed(2)}`, 480, itemY, {
+      align: "right",
+    });
 
+  // GST
+  itemY += 15;
+
+  doc
+    .text(`GST / Tax (${pricing.gst_percentage ?? 18}%):`, 330, itemY, {
+      width: 140,
+      align: "right",
+    })
+    .text(`₹${gst.toFixed(2)}`, 480, itemY, {
+      align: "right",
+    });
+
+  // Discount
   if (discount > 0) {
     itemY += 15;
+
     doc
       .text(`Discount (${order.coupon_code || "Coupon"}):`, 330, itemY, {
         width: 140,
         align: "right",
       })
-      .text(`- ₹${discount.toFixed(2)}`, 480, itemY, { align: "right" });
+      .text(`- ₹${discount.toFixed(2)}`, 480, itemY, {
+        align: "right",
+      });
   }
 
+  // Shipping
   itemY += 15;
+
   doc
     .text("Shipping:", 380, itemY)
     .text(shipping > 0 ? `₹${shipping.toFixed(2)}` : "FREE", 480, itemY, {
       align: "right",
     });
 
+  // Divider
   itemY += 20;
+
   doc.moveTo(350, itemY).lineTo(550, itemY).strokeColor("#E0E0E0").stroke();
 
+  // Grand Total
   itemY += 10;
+
   doc
     .fillColor(GOLD)
     .font("Helvetica-Bold")
     .fontSize(12)
     .text("Grand Total:", 360, itemY)
-    .text(`₹${total.toFixed(2)}`, 480, itemY, { align: "right" });
+    .text(`₹${total.toFixed(2)}`, 480, itemY, {
+      align: "right",
+    });
 
   // Footer Thank you
   doc

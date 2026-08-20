@@ -4,6 +4,17 @@ import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Address from "../models/Address.js";
 import Coupon from "../models/Coupon.js";
+import { calculateGST, calculateFinalAmount } from "../utils/pricing.js";
+import { GST_PERCENTAGE } from "../config/pricing.js";
+import {
+  checkServiceability,
+  createShiprocketOrder,
+  assignShiprocketAwb,
+  generateShiprocketPickup,
+  getShiprocketTracking,
+  generateShiprocketInvoice,
+  SHIPROCKET_CONFIG,
+} from "../config/shiprocket.js";
 import Payment from "../models/Payment.js";
 import User from "../models/User.js";
 import InventoryLog from "../models/InventoryLog.js";
@@ -11,11 +22,6 @@ import razorpayInstance, { isMockMode } from "../config/razorpay.js";
 import { sendEmail } from "../utils/email.js";
 import { drawInvoicePDF } from "../utils/invoicePDF.js";
 import { sendInvoiceEmail } from "../utils/resendEmail.js";
-
-// Shipping logic: Free for order >= 1500, else 99
-const calculateShipping = (subtotal) => {
-  return subtotal >= 1500 ? 0.0 : 99.0;
-};
 
 /**
  * Validate Coupon
@@ -76,6 +82,487 @@ export const applyCoupon = async (req, res) => {
   }
 };
 
+const formatShiprocketAddressLine = (address) => {
+  return `${address.address_line1}${address.address_line2 ? `, ${address.address_line2}` : ""}`;
+};
+
+const buildShiprocketOrderPayload = ({
+  localOrderId,
+  user,
+  address,
+  items,
+  subtotal,
+  shippingCharge,
+  paymentMethod,
+}) => {
+  const orderDate = new Date().toISOString().slice(0, 19).replace("T", " ");
+  console.log("========== BUILD PAYLOAD ITEMS ==========");
+  console.log(JSON.stringify(items, null, 2));
+  return {
+    order_id: localOrderId,
+    order_date: orderDate,
+    pickup_location: SHIPROCKET_CONFIG.pickupLocation,
+    billing_customer_name: user.name || "Customer",
+    billing_last_name: "",
+    billing_address: formatShiprocketAddressLine(address),
+    billing_city: address.city,
+    billing_pincode: address.postal_code,
+    billing_state: address.state,
+    billing_country: address.country || "India",
+    billing_email: user.email,
+    billing_phone: address.phone,
+    shipping_is_billing: true,
+    shipping_customer_name: user.name || "Customer",
+    shipping_address: formatShiprocketAddressLine(address),
+    shipping_city: address.city,
+    shipping_pincode: address.postal_code,
+    shipping_state: address.state,
+    shipping_country: address.country || "India",
+    shipping_email: user.email,
+    shipping_phone: address.phone,
+    order_items: items.map((item) => {
+      console.log("Shiprocket item:", item);
+
+      const doc = item._doc || item;
+
+      const quantity = Number(doc.quantity) || 0;
+      const basePrice = Number(doc.price_at_purchase) || 0;
+
+      // Your website price is GST-exclusive.
+      const gstPerUnit = calculateGST(basePrice);
+
+      // Shiprocket requires selling_price to be GST-inclusive.
+      const sellingPriceInclusive = Number((basePrice + gstPerUnit).toFixed(2));
+
+      return {
+        name: item.name || "Product",
+
+        sku: String(doc.product_id),
+
+        units: quantity,
+
+        selling_price: sellingPriceInclusive,
+
+        discount: 0,
+
+        // Shiprocket expects TAX PERCENTAGE here, not tax amount.
+        tax: GST_PERCENTAGE,
+
+        hsn: "3304",
+
+        brand: "Bhatkar Perfumes",
+      };
+    }),
+    payment_method: paymentMethod === "COD" ? "COD" : "Prepaid",
+    sub_total: Number((subtotal + calculateGST(subtotal)).toFixed(2)),
+    shipping_charges: shippingCharge,
+    length: SHIPROCKET_CONFIG.defaultDimensions.length,
+    breadth: SHIPROCKET_CONFIG.defaultDimensions.breadth,
+    height: SHIPROCKET_CONFIG.defaultDimensions.height,
+    weight: Number(
+      Math.max(
+        SHIPROCKET_CONFIG.defaultWeight || 0.5,
+        items.reduce(
+          (sum, item) =>
+            sum +
+            Number(item.quantity || 1) *
+              Number(SHIPROCKET_CONFIG.defaultWeight || 0.5),
+          0,
+        ),
+      ),
+    ),
+    delivery_postcode: address.postal_code,
+  };
+};
+
+const registerShiprocketShipment = async ({
+  order,
+  user,
+  address,
+  items,
+  subtotal,
+  shippingCharge,
+  paymentMethod,
+}) => {
+  if (order.shiprocket_shipment_id) {
+    console.warn(
+      "Shiprocket registration skipped because order already has shiprocket_shipment_id:",
+      order.shiprocket_shipment_id,
+    );
+    return order;
+  }
+
+  try {
+    const enrichedItems = await Promise.all(
+      items.map(async (item) => {
+        if (item.name) return item;
+
+        if (!item.product_id) {
+          return item;
+        }
+
+        const product = await Product.findById(item.product_id).lean();
+        return {
+          ...item,
+          name: product?.name || `Product ${item.product_id}`,
+        };
+      }),
+    );
+    const normalizedItems = enrichedItems.map((item) =>
+      item.toObject ? item.toObject() : item,
+    );
+    console.log("========== ENRICHED ITEMS ==========");
+    console.log(JSON.stringify(enrichedItems, null, 2));
+
+    const payload = buildShiprocketOrderPayload({
+      localOrderId: order.id,
+      user,
+      address,
+      items: normalizedItems,
+      subtotal,
+      shippingCharge,
+      paymentMethod,
+    });
+
+    let createResponse;
+    try {
+      console.log("========== FINAL SHIPROCKET PAYLOAD ==========");
+      console.log(JSON.stringify(payload, null, 2));
+      createResponse = await createShiprocketOrder(payload);
+      console.log("========== SHIPROCKET CREATE RESPONSE ==========");
+      console.log(JSON.stringify(createResponse, null, 2));
+    } catch (error) {
+      const errorData = error.response?.data || error.data || null;
+      const candidateLocations =
+        errorData?.data || errorData?.data?.data || null;
+      const fallbackPickupLocation = Array.isArray(candidateLocations)
+        ? candidateLocations[0]?.pickup_location
+        : null;
+
+      if (
+        errorData?.message?.includes("Wrong Pickup location entered") &&
+        fallbackPickupLocation
+      ) {
+        console.warn(
+          "Shiprocket pickup location invalid, retrying with:",
+          fallbackPickupLocation,
+        );
+        payload.pickup_location = fallbackPickupLocation;
+        createResponse = await createShiprocketOrder(payload);
+        console.log("========== SHIPROCKET RETRY RESPONSE ==========");
+        console.log(JSON.stringify(createResponse, null, 2));
+      } else {
+        throw error;
+      }
+    }
+
+    const shipmentId =
+      createResponse.shipment_id || createResponse.data?.shipment_id;
+    const shiprocketOrderId =
+      createResponse.order_id ||
+      createResponse.data?.order_id ||
+      createResponse.data?.order_id;
+
+    if (!shipmentId) {
+      // Log payload and full response for debugging when Shiprocket doesn't return shipment_id
+      try {
+        console.error(
+          "Shiprocket create order payload:",
+          JSON.stringify(payload, null, 2),
+        );
+      } catch (e) {
+        console.error("Shiprocket create order payload (stringify failed)", e);
+      }
+      try {
+        console.error(
+          "Shiprocket create response:",
+          JSON.stringify(createResponse, null, 2),
+        );
+      } catch (e) {
+        console.error(
+          "Shiprocket create response (stringify failed)",
+          createResponse,
+        );
+      }
+
+      throw new Error("Shiprocket did not return a shipment_id.");
+    }
+
+    order.shiprocket_order_id = shiprocketOrderId;
+    order.shiprocket_shipment_id = shipmentId;
+    order.shiprocket_status = "Created";
+    await order.save();
+
+    const assignRequest = {
+      shipment_id: shipmentId,
+    };
+
+    if (order.courier?.courier_company_id) {
+      assignRequest.courier_id = order.courier.courier_company_id;
+    }
+    console.debug("Shiprocket assign AWB request:", assignRequest);
+
+    const assignResponse = await assignShiprocketAwb(assignRequest);
+
+    console.log("========== SHIPROCKET ASSIGN AWB RESPONSE ==========");
+    console.log(JSON.stringify(assignResponse, null, 2));
+
+    // Shiprocket response structure:
+    // assignResponse.response.data.awb_code
+
+    const shiprocketData =
+      assignResponse?.response?.data ||
+      assignResponse?.data?.response?.data ||
+      assignResponse?.data ||
+      assignResponse;
+
+    const awbCode =
+      shiprocketData?.awb_code || shiprocketData?.awb_number || null;
+
+    const courierName =
+      shiprocketData?.courier_name || order.courier?.courier_name || null;
+
+    const courierCompanyId =
+      shiprocketData?.courier_company_id ||
+      order.courier?.courier_company_id ||
+      null;
+
+    const assignedShipmentId = shiprocketData?.shipment_id || shipmentId;
+
+    if (!awbCode) {
+      console.error("========== SHIPROCKET AWB ASSIGN FAILED ==========");
+
+      console.error(JSON.stringify(assignResponse, null, 2));
+
+      // Use a status that your existing schema already accepts
+      order.shiprocket_status = "Failed";
+
+      await order.save();
+
+      throw new Error("AWB not Assigned");
+    }
+
+    console.log("========== AWB ASSIGNED SUCCESSFULLY ==========");
+    console.log("AWB:", awbCode);
+    console.log("Courier:", courierName);
+    console.log("Courier Company ID:", courierCompanyId);
+    console.log("Shipment ID:", assignedShipmentId);
+
+    // Save Shiprocket details
+    order.shiprocket_awb = String(awbCode);
+    order.shiprocket_courier_name = courierName;
+    order.shiprocket_shipment_id = assignedShipmentId;
+
+    // Keep this as AWB_ASSIGNED until webhook updates the
+    // actual Shiprocket shipment status.
+    order.shiprocket_status = "AWB_ASSIGNED";
+
+    await order.save();
+
+    console.log("========== SHIPROCKET DETAILS SAVED ==========");
+    console.log({
+      shiprocket_order_id: order.shiprocket_order_id,
+      shiprocket_shipment_id: order.shiprocket_shipment_id,
+      shiprocket_awb: order.shiprocket_awb,
+      shiprocket_courier_name: order.shiprocket_courier_name,
+      shiprocket_status: order.shiprocket_status,
+    });
+
+    return order;
+  } catch (error) {
+    console.error("========== SHIPROCKET ERROR ==========");
+    console.error("Status:", error.response?.status);
+    console.error("Headers:", error.response?.headers);
+    console.error("Response:", JSON.stringify(error.response?.data, null, 2));
+    console.error("Message:", error.message);
+
+    if (error.response?.config?.url) {
+      console.error("URL:", error.response.config.url);
+    }
+
+    return order;
+  }
+};
+
+/**
+ * Preview Order Pricing
+ * Calculates subtotal, coupon, GST & Shiprocket delivery charges
+ * WITHOUT creating an order.
+ */
+export const previewOrder = async (req, res) => {
+  const userId = req.user.id;
+
+  const {
+    items,
+    shippingAddressId,
+    couponCode,
+    paymentMethod = "RAZORPAY",
+  } = req.body;
+
+  if (!items || items.length === 0 || !shippingAddressId) {
+    return res.status(400).json({
+      message: "Items list and shipping address are required.",
+    });
+  }
+
+  try {
+    // -----------------------------------
+    // Validate Address
+    // -----------------------------------
+    const address = await Address.findOne({
+      _id: shippingAddressId,
+      user_id: userId,
+    });
+
+    if (!address) {
+      return res.status(400).json({
+        message: "Invalid shipping address.",
+      });
+    }
+
+    // -----------------------------------
+    // Fetch Products
+    // -----------------------------------
+    const productIds = items.map((item) => item.productId);
+
+    const products = await Product.find({
+      _id: { $in: productIds },
+    }).lean();
+
+    const productMap = {};
+
+    products.forEach((product) => {
+      productMap[product._id.toString()] = product;
+    });
+
+    let subtotal = 0;
+
+    const itemsWithPrice = [];
+
+    for (const item of items) {
+      const product = productMap[item.productId];
+
+      if (!product) {
+        return res.status(404).json({
+          message: `Product not found.`,
+        });
+      }
+
+      if (product.stock_quantity < item.quantity) {
+        return res.status(400).json({
+          message: `${product.name} is out of stock.`,
+        });
+      }
+
+      const activePrice = product.sale_price
+        ? Number(product.sale_price)
+        : Number(product.price);
+
+      subtotal += activePrice * item.quantity;
+
+      itemsWithPrice.push({
+        product,
+        quantity: item.quantity,
+        price: activePrice,
+      });
+    }
+
+    // -----------------------------------
+    // Coupon
+    // -----------------------------------
+    let discount = 0;
+
+    if (couponCode) {
+      const coupon = await validateCouponCode(couponCode, subtotal);
+
+      if (coupon.valid) {
+        discount = coupon.discount;
+      }
+    }
+
+    // -----------------------------------
+    // Shiprocket Serviceability
+    // -----------------------------------
+
+    const serviceability = await checkServiceability({
+      pickupPostcode: SHIPROCKET_CONFIG.pickupPostcode,
+      deliveryPostcode: address.postal_code,
+      cod: paymentMethod === "COD" ? 1 : 0,
+      weight: SHIPROCKET_CONFIG.defaultWeight,
+    });
+    console.log("========== SHIPROCKET RESPONSE ==========");
+    console.log(JSON.stringify(serviceability, null, 2));
+    console.log("=========================================");
+
+    console.log("success:", serviceability.success);
+    console.log("data:", serviceability.data);
+
+    if (
+      serviceability.status !== 200 ||
+      !Array.isArray(serviceability.data?.available_courier_companies)
+    ) {
+      return res.status(400).json({
+        message: "Delivery not available.",
+      });
+    }
+
+    const available_courier_companies =
+      serviceability.data.available_courier_companies;
+
+    const shiprocket_recommended_courier_id =
+      serviceability.data.shiprocket_recommended_courier_id;
+
+    let recommendedCourier = available_courier_companies.find(
+      (courier) =>
+        courier.courier_company_id === shiprocket_recommended_courier_id,
+    );
+
+    // Fallback
+
+    if (!recommendedCourier) {
+      recommendedCourier = available_courier_companies[0];
+    }
+
+    if (!recommendedCourier) {
+      return res.status(400).json({
+        message: "No courier available for this address.",
+      });
+    }
+
+    const shippingCharge = Number(recommendedCourier.freight_charge);
+
+    // -----------------------------------
+    // Pricing
+    // -----------------------------------
+
+    const pricing = calculateFinalAmount({
+      productPrice: subtotal,
+      shippingCharge,
+      discount,
+    });
+
+    return res.status(200).json({
+      success: true,
+
+      pricing,
+
+      courier: {
+        courier_company_id: recommendedCourier.courier_company_id,
+
+        courier_name: recommendedCourier.courier_name,
+
+        estimated_delivery_days: recommendedCourier.estimated_delivery_days,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      message: "Unable to preview order pricing.",
+    });
+  }
+};
+
 /**
  * Create Order (Initiate checkout & Razorpay session)
  */
@@ -98,6 +585,41 @@ export const createOrder = async (req, res) => {
     if (!address) {
       return res.status(400).json({ message: "Invalid shipping address." });
     }
+    // -----------------------------
+    // Get Shipping Charge
+    // -----------------------------
+
+    const serviceability = await checkServiceability({
+      pickupPostcode: SHIPROCKET_CONFIG.pickupPostcode,
+      deliveryPostcode: address.postal_code,
+      cod: paymentMethod === "COD" ? 1 : 0,
+      weight: SHIPROCKET_CONFIG.defaultWeight,
+    });
+    console.log(JSON.stringify(serviceability, null, 2));
+
+    // -----------------------------
+    // Get Recommended Courier
+    // -----------------------------
+
+    const { available_courier_companies, shiprocket_recommended_courier_id } =
+      serviceability.data;
+
+    let recommendedCourier = available_courier_companies.find(
+      (courier) =>
+        courier.courier_company_id === shiprocket_recommended_courier_id,
+    );
+
+    if (!recommendedCourier && available_courier_companies.length > 0) {
+      recommendedCourier = available_courier_companies[0];
+    }
+
+    if (!recommendedCourier) {
+      return res.status(400).json({
+        message: "No courier available.",
+      });
+    }
+
+    const shippingCharge = Number(recommendedCourier.freight_charge);
 
     // 2. Fetch products and calculate total cost in a single batch query
     const productIds = items.map((item) => item.productId);
@@ -149,8 +671,13 @@ export const createOrder = async (req, res) => {
       }
     }
 
-    const shipping = calculateShipping(subtotal - discount);
-    const totalAmount = subtotal - discount + shipping;
+    const pricing = calculateFinalAmount({
+      productPrice: subtotal,
+      shippingCharge,
+      discount,
+    });
+
+    const totalAmount = pricing.payable;
 
     // 4. Create local order record in 'Pending' status
     const newOrder = new Order({
@@ -163,9 +690,17 @@ export const createOrder = async (req, res) => {
 
       total_amount: totalAmount,
 
+      pricing,
+
       discount_amount: discount,
 
       coupon_code: validCouponCode,
+
+      courier: {
+        courier_company_id: recommendedCourier.courier_company_id,
+        courier_name: recommendedCourier.courier_name,
+        estimated_delivery_days: recommendedCourier.estimated_delivery_days,
+      },
 
       shipping_address_id: shippingAddressId,
 
@@ -185,17 +720,36 @@ export const createOrder = async (req, res) => {
     if (paymentMethod === "COD") {
       newOrder.status = "Pending";
       newOrder.payment_status = "Pending";
-
       await newOrder.save();
+
+      try {
+        const customer = await User.findById(userId);
+        if (customer) {
+          await registerShiprocketShipment({
+            order: newOrder,
+            user: customer,
+            address,
+            items: itemsWithPrice,
+            subtotal,
+            shippingCharge,
+            paymentMethod,
+          });
+        }
+      } catch (shipErr) {
+        console.error("COD Shiprocket registration failed:", shipErr);
+      }
 
       return res.status(201).json({
         success: true,
         paymentMethod: "COD",
         orderId: localOrderId,
         amount: totalAmount,
-        shipping,
+        pricing,
+        shippingCharge,
         discount,
         subtotal,
+        currency: "INR",
+        isMock: isMockMode(),
       });
     }
 
@@ -229,7 +783,8 @@ export const createOrder = async (req, res) => {
       orderId: localOrderId,
       razorpayOrderId: rzpOrderId,
       amount: totalAmount,
-      shipping,
+      pricing,
+      shippingCharge,
       discount,
       subtotal,
       currency: "INR",
@@ -241,10 +796,101 @@ export const createOrder = async (req, res) => {
   }
 };
 
+export const trackOrder = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { orderId } = req.params;
+
+    console.log("========== TRACK ORDER ==========");
+    console.log("Requested orderId:", orderId);
+    console.log("Authenticated userId:", userId);
+
+    const order = await Order.findOne({
+      _id: orderId,
+      user_id: userId,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found.",
+      });
+    }
+
+    if (!order.shiprocket_awb) {
+      return res.status(400).json({
+        message: "Tracking is not available for this order yet.",
+      });
+    }
+
+    const trackingResponse = await getShiprocketTracking(order.shiprocket_awb);
+
+    return res.status(200).json({
+      success: true,
+      awb: order.shiprocket_awb,
+      tracking: trackingResponse.tracking_data || null,
+    });
+  } catch (error) {
+    console.error("Shiprocket tracking error:", error.response?.data || error);
+
+    return res.status(500).json({
+      message: "Unable to fetch tracking details.",
+    });
+  }
+};
+
+export const getOrderInvoice = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { orderId } = req.params;
+
+    const order = await Order.findOne({
+      _id: orderId,
+      user_id: userId,
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found.",
+      });
+    }
+
+    if (!order.shiprocket_order_id) {
+      return res.status(400).json({
+        message: "Invoice is not available for this order yet.",
+      });
+    }
+
+    const invoiceResponse = await generateShiprocketInvoice(
+      order.shiprocket_order_id,
+    );
+
+    if (!invoiceResponse?.is_invoice_created || !invoiceResponse?.invoice_url) {
+      console.error("Shiprocket invoice response:", invoiceResponse);
+
+      return res.status(400).json({
+        message: "Shiprocket invoice could not be generated.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      invoiceUrl: invoiceResponse.invoice_url,
+    });
+  } catch (error) {
+    console.error("Shiprocket invoice error:", error.response?.data || error);
+
+    return res.status(500).json({
+      message: "Unable to generate invoice.",
+    });
+  }
+};
+
 /**
  * Verify Razorpay payment and confirm order
  */
 export const verifyPayment = async (req, res) => {
+  console.log("========== VERIFY PAYMENT ==========");
+  console.log(req.body);
   const userId = req.user.id;
   const { orderId, razorpayPaymentId, razorpayOrderId, razorpaySignature } =
     req.body;
@@ -261,7 +907,13 @@ export const verifyPayment = async (req, res) => {
     if (!order) {
       return res.status(404).json({ message: "Order not found." });
     }
-
+    if (order.payment_status === "Paid") {
+      return res.status(200).json({
+        success: true,
+        message: "Payment already verified.",
+        orderId: order.id,
+      });
+    }
     if (order.status !== "Pending") {
       return res
         .status(400)
@@ -349,7 +1001,36 @@ export const verifyPayment = async (req, res) => {
       }
     }
 
-    // 6. Send invoice via Resend
+    // 6. Register with Shiprocket for prepaid orders only
+    if (order.payment_method !== "COD") {
+      try {
+        const address = await Address.findById(order.shipping_address_id);
+        if (customer && address) {
+          await registerShiprocketShipment({
+            order,
+            user: customer,
+            address,
+            items: order.items,
+            subtotal: order.pricing?.product_price || 0,
+            shippingCharge:
+              order.pricing?.delivery_charge ??
+              order.pricing?.delivery_charges ??
+              order.pricing?.shippingCharge ??
+              0,
+            paymentMethod: order.payment_method,
+          });
+        }
+      } catch (shipErr) {
+        console.error("Shiprocket registration after payment failed:", shipErr);
+      }
+    } else {
+      console.debug(
+        "Skipping Shiprocket registration in verifyPayment for COD order",
+        orderId,
+      );
+    }
+
+    // 7. Send invoice via Resend
     try {
       const populatedOrder = await Order.findById(orderId)
         .populate("user_id")

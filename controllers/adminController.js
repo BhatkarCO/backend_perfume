@@ -463,33 +463,54 @@ export const getAdminUsers = async (req, res) => {
 
 /**
  * Block / Unblock User (Admin only)
- * Sets role to 'blocked' or reverts to 'user'
  */
 export const toggleBlockUser = async (req, res) => {
   const { userId } = req.params;
-  const { block } = req.body; // boolean
+  const { block } = req.body;
 
   try {
-    const role = block ? "blocked" : "user";
-    const user = await User.findByIdAndUpdate(
-      userId,
-      { role },
-      { new: true },
-    ).select("id email role name");
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found." });
+    // Prevent admin from blocking themselves
+    if (req.user.id === userId) {
+      return res.status(400).json({
+        message: "You cannot block your own account.",
+      });
     }
 
-    res.status(200).json({
+    const targetUser = await User.findById(userId);
+
+    if (!targetUser) {
+      return res.status(404).json({
+        message: "User not found.",
+      });
+    }
+
+    // Prevent blocking any admin account
+    if (targetUser.role === "admin") {
+      return res.status(400).json({
+        message: "Admin accounts cannot be blocked.",
+      });
+    }
+
+    targetUser.role = block ? "blocked" : "user";
+
+    await targetUser.save();
+
+    return res.status(200).json({
       message: block
         ? "User blocked successfully."
         : "User unblocked successfully.",
-      user,
+      user: {
+        id: targetUser.id,
+        name: targetUser.name,
+        email: targetUser.email,
+        role: targetUser.role,
+      },
     });
   } catch (error) {
     console.error("Block user error:", error);
-    res.status(500).json({ message: "Error editing user privileges." });
+    return res.status(500).json({
+      message: "Error editing user privileges.",
+    });
   }
 };
 
