@@ -102,6 +102,7 @@ app.use("/api/products", productRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/webhooks/shiprocket", shiprocketWebhookRoutes);
+app.use("/api/webhooks/shipping", shiprocketWebhookRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/user", userRoutes);
