@@ -1,5 +1,4 @@
 import crypto from "crypto";
-import PDFDocument from "pdfkit";
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Address from "../models/Address.js";
@@ -20,8 +19,6 @@ import User from "../models/User.js";
 import InventoryLog from "../models/InventoryLog.js";
 import razorpayInstance, { isMockMode } from "../config/razorpay.js";
 import { sendEmail } from "../utils/email.js";
-import { drawInvoicePDF } from "../utils/invoicePDF.js";
-import { sendInvoiceEmail } from "../utils/resendEmail.js";
 
 /**
  * Validate Coupon
@@ -490,13 +487,6 @@ export const previewOrder = async (req, res) => {
       cod: paymentMethod === "COD" ? 1 : 0,
       weight: SHIPROCKET_CONFIG.defaultWeight,
     });
-    console.log("========== SHIPROCKET RESPONSE ==========");
-    console.log(JSON.stringify(serviceability, null, 2));
-    console.log("=========================================");
-
-    console.log("success:", serviceability.success);
-    console.log("data:", serviceability.data);
-
     if (
       serviceability.status !== 200 ||
       !Array.isArray(serviceability.data?.available_courier_companies)
@@ -838,53 +828,6 @@ export const trackOrder = async (req, res) => {
   }
 };
 
-export const getOrderInvoice = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { orderId } = req.params;
-
-    const order = await Order.findOne({
-      _id: orderId,
-      user_id: userId,
-    });
-
-    if (!order) {
-      return res.status(404).json({
-        message: "Order not found.",
-      });
-    }
-
-    if (!order.shiprocket_order_id) {
-      return res.status(400).json({
-        message: "Invoice is not available for this order yet.",
-      });
-    }
-
-    const invoiceResponse = await generateShiprocketInvoice(
-      order.shiprocket_order_id,
-    );
-
-    if (!invoiceResponse?.is_invoice_created || !invoiceResponse?.invoice_url) {
-      console.error("Shiprocket invoice response:", invoiceResponse);
-
-      return res.status(400).json({
-        message: "Shiprocket invoice could not be generated.",
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      invoiceUrl: invoiceResponse.invoice_url,
-    });
-  } catch (error) {
-    console.error("Shiprocket invoice error:", error.response?.data || error);
-
-    return res.status(500).json({
-      message: "Unable to generate invoice.",
-    });
-  }
-};
-
 /**
  * Verify Razorpay payment and confirm order
  */
@@ -1156,55 +1099,121 @@ export const downloadInvoice = async (req, res) => {
   const userRole = req.user.role;
 
   try {
-    const orderObj = await Order.findById(orderId)
-      .populate("user_id")
-      .populate("shipping_address_id")
-      .populate("items.product_id");
+    // ----------------------------------------
+    // Find order
+    // ----------------------------------------
 
-    if (!orderObj) {
-      return res.status(404).json({ message: "Order or invoice not found." });
+    const order = await Order.findById(orderId);
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found.",
+      });
     }
+
+    // ----------------------------------------
+    // Authorization
+    // ----------------------------------------
 
     if (
       userRole !== "admin" &&
-      orderObj.user_id?._id.toString() !== userId.toString()
+      order.user_id.toString() !== userId.toString()
     ) {
-      return res.status(403).json({ message: "Unauthorized action." });
+      return res.status(403).json({
+        message: "Unauthorized action.",
+      });
     }
 
-    const order = {
-      ...orderObj.toObject(),
-      customer_name: orderObj.user_id?.name,
-      customer_email: orderObj.user_id?.email,
-      address_line1: orderObj.shipping_address_id?.address_line1,
-      address_line2: orderObj.shipping_address_id?.address_line2,
-      city: orderObj.shipping_address_id?.city,
-      state: orderObj.shipping_address_id?.state,
-      postal_code: orderObj.shipping_address_id?.postal_code,
-      shipping_phone: orderObj.shipping_address_id?.phone,
-      country: orderObj.shipping_address_id?.country,
-    };
+    // ----------------------------------------
+    // Check Shiprocket order
+    // ----------------------------------------
 
-    const items = orderObj.items.map((item) => ({
-      quantity: item.quantity,
-      price_at_purchase: item.price_at_purchase,
-      name: item.product_id?.name,
-    }));
+    if (!order.shiprocket_order_id) {
+      return res.status(400).json({
+        message: "Invoice is not available for this order yet.",
+      });
+    }
 
-    // Generate PDF using PDFKit
-    const doc = new PDFDocument({ margin: 50 });
+    // ----------------------------------------
+    // Generate Shiprocket invoice
+    // ----------------------------------------
 
-    // HTTP Headers for PDF streaming
+    console.log("========== GENERATING SHIPROCKET INVOICE ==========");
+    console.log("Local Order ID:", orderId);
+    console.log("Shiprocket Order ID:", order.shiprocket_order_id);
+
+    const invoiceResponse = await generateShiprocketInvoice(
+      order.shiprocket_order_id,
+    );
+
+    console.log("========== SHIPROCKET INVOICE RESPONSE ==========");
+    console.log(JSON.stringify(invoiceResponse, null, 2));
+
+    // ----------------------------------------
+    // Get invoice URL
+    // ----------------------------------------
+
+    const invoiceUrl =
+      invoiceResponse?.invoice_url ||
+      invoiceResponse?.invoiceUrl ||
+      invoiceResponse?.url ||
+      invoiceResponse?.data?.invoice_url ||
+      invoiceResponse?.data?.invoiceUrl ||
+      invoiceResponse?.data?.url;
+
+    if (!invoiceUrl) {
+      console.error("Shiprocket invoice URL missing:", invoiceResponse);
+
+      return res.status(400).json({
+        message: "Shiprocket invoice could not be generated.",
+      });
+    }
+
+    console.log("Shiprocket Invoice URL:", invoiceUrl);
+
+    // ----------------------------------------
+    // Download PDF from Shiprocket
+    // ----------------------------------------
+
+    const pdfResponse = await fetch(invoiceUrl);
+
+    if (!pdfResponse.ok) {
+      console.error(
+        "Failed to download Shiprocket invoice:",
+        pdfResponse.status,
+        pdfResponse.statusText,
+      );
+
+      return res.status(502).json({
+        message: "Unable to download invoice from Shiprocket.",
+      });
+    }
+
+    const arrayBuffer = await pdfResponse.arrayBuffer();
+    const pdfBuffer = Buffer.from(arrayBuffer);
+
+    // ----------------------------------------
+    // Send Shiprocket PDF to frontend
+    // ----------------------------------------
+
     res.setHeader("Content-Type", "application/pdf");
+
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename=Invoice_Bhatkar_${orderId}.pdf`,
+      `attachment; filename="Invoice_Bhatkar_${orderId}.pdf"`,
     );
-    doc.pipe(res);
 
-    drawInvoicePDF(doc, order, items);
+    res.setHeader("Content-Length", pdfBuffer.length);
+
+    return res.status(200).send(pdfBuffer);
   } catch (error) {
-    console.error("Invoice PDF generation error:", error);
-    res.status(500).json({ message: "Error generating invoice." });
+    console.error(
+      "Invoice PDF download error:",
+      error.response?.data || error.message || error,
+    );
+
+    return res.status(500).json({
+      message: "Unable to generate invoice.",
+    });
   }
 };

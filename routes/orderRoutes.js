@@ -6,7 +6,6 @@ import {
   getUserOrders,
   getOrderById,
   trackOrder,
-  getOrderInvoice,
   downloadInvoice,
   applyCoupon,
 } from "../controllers/orderController.js";
@@ -20,7 +19,6 @@ router.post("/verify", verifyToken, verifyPayment);
 router.get("/my-orders", verifyToken, getUserOrders);
 router.get("/my-orders/:orderId", verifyToken, getOrderById);
 router.get("/:orderId/tracking", verifyToken, trackOrder);
-router.get("/:orderId/invoice", verifyToken, getOrderInvoice);
 router.get("/invoice/:orderId", verifyToken, downloadInvoice);
 router.post("/apply-coupon", verifyToken, applyCoupon);
 

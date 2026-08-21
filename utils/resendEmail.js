@@ -1,27 +1,7 @@
 import { Resend } from "resend";
-import PDFDocument from "pdfkit";
-import { drawInvoicePDF } from "./invoicePDF.js";
+import { generateShiprocketInvoice } from "../config/shiprocket.js";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-
-/**
- * Generates the invoice PDF into a Buffer in memory
- */
-const generateInvoiceBuffer = (order, items) => {
-  return new Promise((resolve, reject) => {
-    try {
-      const doc = new PDFDocument({ margin: 50 });
-      const chunks = [];
-      doc.on("data", (chunk) => chunks.push(chunk));
-      doc.on("end", () => resolve(Buffer.concat(chunks)));
-      doc.on("error", (err) => reject(err));
-
-      drawInvoicePDF(doc, order, items);
-    } catch (err) {
-      reject(err);
-    }
-  });
-};
 
 /**
  * Sends order invoice via Resend email service
@@ -44,8 +24,45 @@ export const sendInvoiceEmail = async (order, items) => {
       return false;
     }
 
-    console.log(`Generating invoice PDF buffer for order #${order.id}...`);
-    const pdfBuffer = await generateInvoiceBuffer(order, items);
+    console.log(`Generating Shiprocket invoice for order #${order.id}...`);
+
+    if (!order.shiprocket_order_id) {
+      console.warn(
+        `Shiprocket order ID missing for order #${order.id}. Invoice email skipped.`,
+      );
+      return false;
+    }
+
+    const invoiceResponse = await generateShiprocketInvoice(
+      order.shiprocket_order_id,
+    );
+
+    const invoiceUrl =
+      invoiceResponse?.invoice_url ||
+      invoiceResponse?.invoiceUrl ||
+      invoiceResponse?.url ||
+      invoiceResponse?.data?.invoice_url ||
+      invoiceResponse?.data?.invoiceUrl ||
+      invoiceResponse?.data?.url;
+
+    if (!invoiceUrl) {
+      console.error("Shiprocket invoice URL missing:", invoiceResponse);
+
+      return false;
+    }
+
+    console.log(`Downloading Shiprocket invoice for order #${order.id}...`);
+
+    const pdfResponse = await fetch(invoiceUrl);
+
+    if (!pdfResponse.ok) {
+      throw new Error(
+        `Failed to download Shiprocket invoice: ${pdfResponse.status} ${pdfResponse.statusText}`,
+      );
+    }
+
+    const pdfArrayBuffer = await pdfResponse.arrayBuffer();
+    const pdfBuffer = Buffer.from(pdfArrayBuffer);
 
     const subject = `Your Bhatkar Perfumes Order Invoice - #${order.id}`;
 
