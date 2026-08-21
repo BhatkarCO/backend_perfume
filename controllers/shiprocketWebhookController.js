@@ -89,13 +89,6 @@ export const handleShiprocketWebhook = async (req, res) => {
       });
     }
 
-    // ----------------------------------------
-    // Log webhook
-    // ----------------------------------------
-
-    console.log("========== SHIPROCKET WEBHOOK ==========");
-    console.log(JSON.stringify(req.body, null, 2));
-
     const payload = req.body;
 
     // ----------------------------------------
@@ -132,9 +125,6 @@ export const handleShiprocketWebhook = async (req, res) => {
       null;
 
     const normalizedStatus = normalizeShiprocketStatus(rawStatus);
-
-    console.log("Shiprocket status:", rawStatus);
-    console.log("Normalized status:", normalizedStatus);
 
     // ----------------------------------------
     // Validate identifiers
@@ -217,7 +207,7 @@ export const handleShiprocketWebhook = async (req, res) => {
         );
       } else {
         console.warn(
-          `Ignoring older status "${normalizedStatus}" because current status is "${currentStatus}"`,
+          `Ignoring status "${normalizedStatus}" because order is already "${order.shiprocket_status}"`,
         );
       }
     } else {
@@ -229,22 +219,6 @@ export const handleShiprocketWebhook = async (req, res) => {
     // ----------------------------------------
 
     await order.save();
-
-    // ----------------------------------------
-    // Log update
-    // ----------------------------------------
-
-    console.log("========== SHIPROCKET ORDER UPDATED ==========");
-
-    console.log({
-      orderId: order.id,
-      shiprocketOrderId: order.shiprocket_order_id,
-      shiprocketShipmentId: order.shiprocket_shipment_id,
-      awb: order.shiprocket_awb,
-      rawStatus,
-      normalizedStatus,
-      finalStatus: order.shiprocket_status,
-    });
 
     // ----------------------------------------
     // Response
