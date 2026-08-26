@@ -2,6 +2,8 @@ import express from "express";
 import {
   register,
   login,
+  googleAuth,
+  googleAuthCallback,
   verifyOTP,
   resendOTP,
   forgotPassword,
@@ -26,13 +28,20 @@ import { verifyToken } from "../middleware/auth.js";
 
 const router = express.Router();
 
-router.post("/register",validate(registerSchema), register);
+router.post("/register", validate(registerSchema), register);
 router.post("/login", validate(loginSchema), login);
-router.post("/verify-otp",validate(otpSchema), verifyOTP);
-router.post("/resend-otp",validate(resendOTPSchema), resendOTP);
-router.post("/forgot-password",validate(forgotPasswordSchema), forgotPassword);
-router.post("/verify-forgot-password",validate(otpSchema), verifyForgotPasswordOTP);
-router.post("/reset-password",validate(resetPasswordSchema), resetPassword);
+router.get("/google", googleAuth);
+
+router.get("/google/callback", googleAuthCallback);
+router.post("/verify-otp", validate(otpSchema), verifyOTP);
+router.post("/resend-otp", validate(resendOTPSchema), resendOTP);
+router.post("/forgot-password", validate(forgotPasswordSchema), forgotPassword);
+router.post(
+  "/verify-forgot-password",
+  validate(otpSchema),
+  verifyForgotPasswordOTP,
+);
+router.post("/reset-password", validate(resetPasswordSchema), resetPassword);
 router.post("/logout", logout);
 router.get("/me", verifyToken, getCurrentUser);
 

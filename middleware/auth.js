@@ -4,7 +4,11 @@ import User from "../models/User.js";
 
 dotenv.config();
 
-const JWT_SECRET = process.env.JWT_SECRET || "supersecretscentoraauthkey";
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is not configured.");
+}
 
 /**
  * Verify JWT token middleware

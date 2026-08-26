@@ -2,13 +2,23 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import User from "../models/User.js";
+import {
+  createGoogleOAuthState,
+  getGoogleAuthUrl,
+  exchangeGoogleCode,
+} from "../utils/googleAuth.js";
 import OTP from "../models/OTP.js";
 import { sendOTPEmail } from "../utils/resendEmail.js";
 import { generateOTP } from "../utils/otp.js";
 
 dotenv.config();
 
-const JWT_SECRET = process.env.JWT_SECRET || "supersecretscentoraauthkey";
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is not configured.");
+}
+
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
 
 const getCookieOptions = () => {
@@ -176,6 +186,141 @@ export const login = async (req, res) => {
   } catch (error) {
     console.error("Login error:", error);
     res.status(500).json({ message: "Internal server error." });
+  }
+};
+
+/**
+ * Start Google OAuth
+ */
+export const googleAuth = async (req, res) => {
+  try {
+    const state = createGoogleOAuthState();
+
+    res.cookie("google_oauth_state", state, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 10 * 60 * 1000, // 10 minutes
+    });
+
+    const authUrl = getGoogleAuthUrl(state);
+
+    return res.redirect(authUrl);
+  } catch (error) {
+    console.error("Google OAuth initialization failed:", error);
+
+    return res.status(500).json({
+      message: "Unable to start Google authentication.",
+    });
+  }
+};
+
+/**
+ * Google OAuth callback
+ */
+export const googleAuthCallback = async (req, res) => {
+  try {
+    const { code, state } = req.query;
+
+    const savedState = req.cookies.google_oauth_state;
+
+    if (!state || !savedState || state !== savedState) {
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/login?error=invalid_oauth_state`,
+      );
+    }
+
+    res.clearCookie("google_oauth_state", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+    });
+
+    if (!code) {
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/login?error=google_code_missing`,
+      );
+    }
+
+    const googleUser = await exchangeGoogleCode(code);
+
+    const { googleId, email, name, emailVerified } = googleUser;
+
+    let user = await User.findOne({ email });
+
+    // ------------------------------------------------
+    // Existing user
+    // ------------------------------------------------
+
+    if (user) {
+      // Existing account with a different Google account
+      if (user.google_id && user.google_id !== googleId) {
+        return res.redirect(
+          `${process.env.FRONTEND_URL}/login?error=google_account_mismatch`,
+        );
+      }
+
+      // Link Google account to existing user
+      user.google_id = googleId;
+
+      if (emailVerified) {
+        user.is_verified = true;
+      }
+
+      await user.save();
+    }
+
+    // ------------------------------------------------
+    // New Google user
+    // ------------------------------------------------
+    else {
+      user = await User.create({
+        email,
+        name,
+        google_id: googleId,
+        auth_provider: "google",
+        is_verified: emailVerified,
+        role: "user",
+      });
+    }
+
+    // ------------------------------------------------
+    // Create YOUR application's JWT
+    // ------------------------------------------------
+
+    const token = jwt.sign(
+      {
+        id: user.id,
+        role: user.role,
+      },
+      JWT_SECRET,
+      {
+        expiresIn: JWT_EXPIRES_IN,
+      },
+    );
+
+    // ------------------------------------------------
+    // Store JWT in HttpOnly cookie
+    // ------------------------------------------------
+
+    res.cookie("token", token, getCookieOptions());
+
+    // ------------------------------------------------
+    // Redirect to frontend
+    // ------------------------------------------------
+
+    return res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
+  } catch (error) {
+    console.error(
+      "Google OAuth callback failed:",
+      error.response?.data || error.message || error,
+    );
+
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/login?error=google_auth_failed`,
+    );
   }
 };
 
