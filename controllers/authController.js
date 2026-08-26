@@ -52,6 +52,12 @@ const getCookieOptions = () => {
   return options;
 };
 
+const getClearCookieOptions = () => {
+  const options = getCookieOptions();
+  delete options.maxAge;
+  return options;
+};
+
 /**
  * Register User
  */
@@ -673,7 +679,7 @@ export const getCurrentUser = async (req, res) => {
 
 //logout user and clear the token cookie
 export const logout = (req, res) => {
-  res.clearCookie("token", getCookieOptions());
+  res.clearCookie("token", getClearCookieOptions());
 
   res.status(200).json({
     message: "Logged out successfully.",
