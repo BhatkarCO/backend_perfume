@@ -554,6 +554,143 @@ export const previewOrder = async (req, res) => {
 };
 
 /**
+ * Razorpay Webhook
+ *
+ * Receives Razorpay payment events and synchronizes
+ * the local order payment status.
+ */
+export const razorpayWebhook = async (req, res) => {
+  try {
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+    if (!webhookSecret) {
+      console.error("RAZORPAY_WEBHOOK_SECRET is not configured.");
+      return res.status(500).json({
+        message: "Webhook configuration error.",
+      });
+    }
+
+    // req.body is a Buffer because server.js uses express.raw()
+    const signature = req.headers["x-razorpay-signature"];
+
+    if (!signature) {
+      return res.status(400).json({
+        message: "Missing Razorpay webhook signature.",
+      });
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", webhookSecret)
+      .update(req.body)
+      .digest("hex");
+
+    if (
+      !crypto.timingSafeEqual(
+        Buffer.from(signature),
+        Buffer.from(expectedSignature),
+      )
+    ) {
+      console.error("Invalid Razorpay webhook signature.");
+      return res.status(400).json({
+        message: "Invalid webhook signature.",
+      });
+    }
+
+    const payload = JSON.parse(req.body.toString("utf8"));
+
+    const event = payload.event;
+
+    console.log(`Razorpay webhook received: ${event}`);
+
+    // Payment captured successfully
+    if (event === "payment.captured") {
+      const payment = payload.payload?.payment?.entity;
+
+      const razorpayOrderId = payment?.order_id;
+      const razorpayPaymentId = payment?.id;
+
+      if (!razorpayOrderId || !razorpayPaymentId) {
+        return res.status(400).json({
+          message: "Invalid payment webhook payload.",
+        });
+      }
+
+      const order = await Order.findOne({
+        razorpay_order_id: razorpayOrderId,
+      });
+
+      if (!order) {
+        console.warn(
+          `No local order found for Razorpay order ${razorpayOrderId}`,
+        );
+
+        // Acknowledge webhook so Razorpay doesn't repeatedly retry it.
+        return res.status(200).json({
+          received: true,
+        });
+      }
+
+      // Idempotency: don't modify an already-paid order
+      if (order.payment_status !== "Paid") {
+        order.payment_status = "Paid";
+        order.status = "Confirmed";
+        order.razorpay_payment_id = razorpayPaymentId;
+
+        await order.save();
+
+        console.log(`Order ${order._id} marked as paid.`);
+      }
+
+      return res.status(200).json({
+        received: true,
+      });
+    }
+
+    // Payment failed
+    if (event === "payment.failed") {
+      const payment = payload.payload?.payment?.entity;
+
+      const razorpayOrderId = payment?.order_id;
+
+      if (!razorpayOrderId) {
+        return res.status(400).json({
+          message: "Invalid payment failure webhook payload.",
+        });
+      }
+
+      const order = await Order.findOne({
+        razorpay_order_id: razorpayOrderId,
+      });
+
+      if (order) {
+        // Don't overwrite a payment that has already succeeded.
+        if (order.payment_status !== "Paid") {
+          order.payment_status = "Failed";
+          await order.save();
+
+          console.log(`Order ${order._id} payment marked as failed.`);
+        }
+      }
+
+      return res.status(200).json({
+        received: true,
+      });
+    }
+
+    // We don't need to process every Razorpay event.
+    return res.status(200).json({
+      received: true,
+    });
+  } catch (error) {
+    console.error("Razorpay webhook error:", error);
+
+    return res.status(500).json({
+      message: "Webhook processing failed.",
+    });
+  }
+};
+
+/**
  * Create Order (Initiate checkout & Razorpay session)
  */
 export const createOrder = async (req, res) => {
@@ -1021,7 +1158,13 @@ export const getUserOrders = async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const orders = await Order.find({ user_id: userId })
+    const orders = await Order.find({
+      user_id: userId,
+      $or: [
+        { payment_method: "COD" },
+        { payment_method: "RAZORPAY", payment_status: "Paid" },
+      ],
+    })
       .sort({ created_at: -1 })
       .lean();
 

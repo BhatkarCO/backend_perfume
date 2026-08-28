@@ -13,6 +13,7 @@ import productRoutes from "./routes/productRoutes.js";
 import categoryRoutes from "./routes/categoryRoutes.js";
 import wishlistRoutes from "./routes/wishlistRoutes.js";
 import shiprocketWebhookRoutes from "./routes/shiprocketWebhookRoutes.js";
+import razorpayWebhookRoutes from "./routes/razorpayWebhookRoutes.js";
 import orderRoutes from "./routes/orderRoutes.js";
 import addressRoutes from "./routes/addressRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
@@ -75,6 +76,8 @@ app.use(cors(corsOptions));
 // Use cookie parser middleware
 app.use(cookieParser());
 
+app.use("/api/webhooks/razorpay", razorpayWebhookRoutes);
+
 // JSON Request Parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -113,12 +116,10 @@ app.use("/api/chat", chatRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {
-  res
-    .status(200)
-    .json({
-      status: "UP",
-      message: "Bhatkar Perfumes Server is running fine.",
-    });
+  res.status(200).json({
+    status: "UP",
+    message: "Bhatkar Perfumes Server is running fine.",
+  });
 });
 
 // Root route
