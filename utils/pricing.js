@@ -17,11 +17,11 @@ export const calculateFinalAmount = ({
 
   const gst = calculateGST(productPriceValue);
 
-  const subtotal = productPriceValue + shippingChargeValue;
+  const subtotal = Number((productPriceValue + shippingChargeValue).toFixed(2));
 
-  const total = subtotal + gst;
+  const total = Number((subtotal + gst).toFixed(2));
 
-  const payable = Math.max(0, total - discountValue);
+  const payable = Number(Math.max(0, total - discountValue).toFixed(2));
 
   return {
     product_price: productPriceValue,

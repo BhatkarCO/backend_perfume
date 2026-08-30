@@ -6,6 +6,7 @@ import {
   getProductReviewsAdmin,
   deleteReview,
   getAdminOrders,
+  getAdminOrderById,
   updateOrderStatus,
   getAdminUsers,
   toggleBlockUser,
@@ -37,6 +38,7 @@ router.delete("/reviews/:reviewId", deleteReview);
 // Orders
 router.get("/orders", getAdminOrders);
 router.put("/orders/:orderId/status", updateOrderStatus);
+router.get("/orders/:orderId", getAdminOrderById);
 
 // Customers
 router.get("/users", getAdminUsers);

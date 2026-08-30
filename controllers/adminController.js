@@ -355,12 +355,26 @@ export const deleteReview = async (req, res) => {
 // --- ORDER MANAGEMENT ---
 
 /**
- * View all orders (Admin only)
+ * View all confirmed orders (Admin only)
+ *
+ * COD orders are valid immediately.
+ * Razorpay orders are valid only after payment is confirmed.
  */
 export const getAdminOrders = async (req, res) => {
   try {
-    const orders = await Order.find()
-      .populate("user_id")
+    const orders = await Order.find({
+      $or: [
+        // COD orders are legitimate orders immediately
+        { payment_method: "COD" },
+
+        // Razorpay orders only become orders after successful payment
+        {
+          payment_method: "RAZORPAY",
+          payment_status: "Paid",
+        },
+      ],
+    })
+      .populate("user_id", "name email")
       .sort({ created_at: -1 })
       .lean();
 
@@ -374,7 +388,79 @@ export const getAdminOrders = async (req, res) => {
     res.status(200).json(formattedOrders);
   } catch (error) {
     console.error("Admin get orders error:", error);
-    res.status(500).json({ message: "Error retrieving orders." });
+    res.status(500).json({
+      message: "Error retrieving orders.",
+    });
+  }
+};
+
+/**
+ * Get single order details (Admin only)
+ */
+export const getAdminOrderById = async (req, res) => {
+  const { orderId } = req.params;
+
+  try {
+    const order = await Order.findById(orderId)
+      .populate("user_id", "name email phone")
+      .populate("shipping_address_id")
+      .populate("items.product_id");
+
+    if (!order) {
+      return res.status(404).json({
+        message: "Order not found.",
+      });
+    }
+
+    const orderObj = order.toObject();
+
+    // Customer details
+    orderObj.customer_name = order.user_id?.name || "Unknown";
+    orderObj.customer_email = order.user_id?.email || "Unknown";
+    orderObj.customer_phone = order.user_id?.phone || "";
+
+    // Shipping address
+    orderObj.address_line1 =
+      order.shipping_address_id?.address_line1 || "";
+    orderObj.address_line2 =
+      order.shipping_address_id?.address_line2 || "";
+    orderObj.city = order.shipping_address_id?.city || "";
+    orderObj.state = order.shipping_address_id?.state || "";
+    orderObj.postal_code =
+      order.shipping_address_id?.postal_code || "";
+    orderObj.shipping_phone =
+      order.shipping_address_id?.phone || "";
+    orderObj.country =
+      order.shipping_address_id?.country || "India";
+
+    // Order items
+    orderObj.items = order.items.map((item) => {
+      const product = item.product_id;
+
+      const primaryImage =
+        product?.images?.find((img) => img.is_primary)?.image_url ||
+        product?.images?.[0]?.image_url ||
+        null;
+
+      return {
+        product_id: product?._id,
+        name: product?.name || "Product",
+        slug: product?.slug,
+        quantity: item.quantity,
+        price_at_purchase: item.price_at_purchase,
+        primary_image: primaryImage,
+      };
+    });
+
+    orderObj.id = order._id.toString();
+
+    res.status(200).json(orderObj);
+  } catch (error) {
+    console.error("Admin get order details error:", error);
+
+    res.status(500).json({
+      message: "Error retrieving order details.",
+    });
   }
 };
 

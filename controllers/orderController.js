@@ -227,7 +227,6 @@ const registerShiprocketShipment = async ({
       console.log(JSON.stringify(payload, null, 2));
       createResponse = await createShiprocketOrder(payload);
       console.log("========== SHIPROCKET CREATE RESPONSE ==========");
-      console.log(JSON.stringify(createResponse, null, 2));
     } catch (error) {
       const errorData = error.response?.data || error.data || null;
       const candidateLocations =
@@ -722,7 +721,7 @@ export const createOrder = async (req, res) => {
       cod: paymentMethod === "COD" ? 1 : 0,
       weight: SHIPROCKET_CONFIG.defaultWeight,
     });
-    console.log(JSON.stringify(serviceability, null, 2));
+    console.log("🚚 Shiprocket serviceability checked");
 
     // -----------------------------
     // Get Recommended Courier
