@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const AI_SERVICE_URL = "https://chat-bot-1-v8we.onrender.com/chat";
+const AI_SERVICE_URL = "https://ai-service-perfume.onrender.com/chat";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
