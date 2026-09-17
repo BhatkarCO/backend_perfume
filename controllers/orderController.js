@@ -3,7 +3,7 @@ import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Address from "../models/Address.js";
 import Coupon from "../models/Coupon.js";
-import { calculateGST, calculateFinalAmount } from "../utils/pricing.js";
+import { calculateFinalAmount } from "../utils/pricing.js";
 import { GST_PERCENTAGE } from "../config/pricing.js";
 import {
   checkServiceability,
@@ -19,6 +19,7 @@ import User from "../models/User.js";
 import InventoryLog from "../models/InventoryLog.js";
 import razorpayInstance, { isMockMode } from "../config/razorpay.js";
 import { sendEmail } from "../utils/email.js";
+const COD_CHARGE = 65;
 
 /**
  * Validate Coupon
@@ -91,6 +92,8 @@ const buildShiprocketOrderPayload = ({
   subtotal,
   shippingCharge,
   paymentMethod,
+  couponDiscount = 0,
+  codCharge = 0,
 }) => {
   const orderDate = new Date().toISOString().slice(0, 19).replace("T", " ");
   console.log("========== BUILD PAYLOAD ITEMS ==========");
@@ -123,13 +126,9 @@ const buildShiprocketOrderPayload = ({
       const doc = item._doc || item;
 
       const quantity = Number(doc.quantity) || 0;
-      const basePrice = Number(doc.price_at_purchase) || 0;
 
-      // Your website price is GST-exclusive.
-      const gstPerUnit = calculateGST(basePrice);
-
-      // Shiprocket requires selling_price to be GST-inclusive.
-      const sellingPriceInclusive = Number((basePrice + gstPerUnit).toFixed(2));
+      // price_at_purchase is already GST-inclusive.
+      const sellingPriceInclusive = Number(doc.price_at_purchase || 0);
 
       return {
         name: item.name || "Product",
@@ -151,8 +150,10 @@ const buildShiprocketOrderPayload = ({
       };
     }),
     payment_method: paymentMethod === "COD" ? "COD" : "Prepaid",
-    sub_total: Number((subtotal + calculateGST(subtotal)).toFixed(2)),
-    shipping_charges: shippingCharge,
+    sub_total: Number((subtotal - couponDiscount).toFixed(2)),
+    shipping_charges: Number(Number(shippingCharge || 0).toFixed(2)),
+    total_discount: Number(Number(couponDiscount || 0).toFixed(2)),
+    transaction_charges: Number(Number(codCharge || 0).toFixed(2)),
     length: SHIPROCKET_CONFIG.defaultDimensions.length,
     breadth: SHIPROCKET_CONFIG.defaultDimensions.breadth,
     height: SHIPROCKET_CONFIG.defaultDimensions.height,
@@ -180,6 +181,8 @@ const registerShiprocketShipment = async ({
   subtotal,
   shippingCharge,
   paymentMethod,
+  couponDiscount = 0,
+  codCharge = 0,
 }) => {
   if (order.shiprocket_shipment_id) {
     console.warn(
@@ -219,8 +222,9 @@ const registerShiprocketShipment = async ({
       subtotal,
       shippingCharge,
       paymentMethod,
+      couponDiscount,
+      codCharge,
     });
-
     let createResponse;
     try {
       console.log("========== FINAL SHIPROCKET PAYLOAD ==========");
@@ -382,7 +386,8 @@ const registerShiprocketShipment = async ({
 
 /**
  * Preview Order Pricing
- * Calculates subtotal, coupon, GST & Shiprocket delivery charges
+ * Calculates GST-inclusive product subtotal, coupon,
+ * COD charge and Shiprocket delivery charges
  * WITHOUT creating an order.
  */
 export const previewOrder = async (req, res) => {
@@ -432,6 +437,7 @@ export const previewOrder = async (req, res) => {
     });
 
     let subtotal = 0;
+    let productDiscountTotal = 0;
 
     const itemsWithPrice = [];
 
@@ -450,9 +456,19 @@ export const previewOrder = async (req, res) => {
         });
       }
 
-      const activePrice = product.sale_price
+      const basePrice = product.sale_price
         ? Number(product.sale_price)
         : Number(product.price);
+
+      // Sale price is already GST-inclusive.
+      // DO NOT add GST here.
+      const activePrice = basePrice;
+
+      const productDiscount = product.sale_price
+        ? Math.max(0, Number(product.price) - Number(product.sale_price))
+        : 0;
+
+      productDiscountTotal += productDiscount * item.quantity;
 
       subtotal += activePrice * item.quantity;
 
@@ -460,6 +476,8 @@ export const previewOrder = async (req, res) => {
         product,
         quantity: item.quantity,
         price: activePrice,
+        base_price: basePrice,
+        product_discount: productDiscount,
       });
     }
 
@@ -524,10 +542,14 @@ export const previewOrder = async (req, res) => {
     // Pricing
     // -----------------------------------
 
+    const codCharge = paymentMethod === "COD" ? COD_CHARGE : 0;
+
     const pricing = calculateFinalAmount({
       productPrice: subtotal,
       shippingCharge,
       discount,
+      productDiscount: productDiscountTotal,
+      codCharge,
     });
 
     return res.status(200).json({
@@ -757,6 +779,8 @@ export const createOrder = async (req, res) => {
     });
 
     let subtotal = 0;
+    let productDiscountTotal = 0;
+
     const itemsWithPrice = [];
 
     for (const item of items) {
@@ -773,15 +797,28 @@ export const createOrder = async (req, res) => {
         });
       }
 
-      const activePrice = product.sale_price
-        ? parseFloat(product.sale_price)
-        : parseFloat(product.price);
+      const basePrice = product.sale_price
+        ? Number(product.sale_price)
+        : Number(product.price);
+
+      // Sale price already includes GST.
+      const activePrice = basePrice;
+
+      const productDiscount = product.sale_price
+        ? Math.max(0, Number(product.price) - Number(product.sale_price))
+        : 0;
+
       subtotal += activePrice * item.quantity;
+
+      productDiscountTotal += productDiscount * item.quantity;
 
       itemsWithPrice.push({
         product_id: product._id.toString(),
         name: product.name,
         quantity: item.quantity,
+
+        // This is the actual customer selling price.
+        // It already includes GST.
         price_at_purchase: activePrice,
       });
     }
@@ -797,13 +834,20 @@ export const createOrder = async (req, res) => {
       }
     }
 
+    const codCharge = paymentMethod === "COD" ? COD_CHARGE : 0;
+
     const pricing = calculateFinalAmount({
       productPrice: subtotal,
       shippingCharge,
       discount,
+      productDiscount: productDiscountTotal,
+      codCharge,
     });
 
-    const totalAmount = pricing.payable;
+    const totalAmount = pricing.final_payable;
+
+    pricing.cod_charge = codCharge;
+    pricing.final_payable = totalAmount;
 
     // 4. Create local order record in 'Pending' status
     const newOrder = new Order({
@@ -859,6 +903,8 @@ export const createOrder = async (req, res) => {
             subtotal,
             shippingCharge,
             paymentMethod,
+            couponDiscount: discount,
+            codCharge,
           });
         }
       } catch (shipErr) {
@@ -1090,13 +1136,21 @@ export const verifyPayment = async (req, res) => {
             user: customer,
             address,
             items: order.items,
+
             subtotal: order.pricing?.product_price || 0,
+
             shippingCharge:
               order.pricing?.delivery_charge ??
               order.pricing?.delivery_charges ??
               order.pricing?.shippingCharge ??
               0,
+
             paymentMethod: order.payment_method,
+
+            couponDiscount:
+              order.pricing?.coupon_discount ?? order.discount_amount ?? 0,
+
+            codCharge: order.pricing?.cod_charge ?? 0,
           });
         }
       } catch (shipErr) {

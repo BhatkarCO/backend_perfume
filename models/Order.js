@@ -44,12 +44,27 @@ const orderSchema = new mongoose.Schema(
     pricing: {
       product_price: Number,
       delivery_charge: Number,
+
       gst_percentage: Number,
       gst_amount: Number,
+
       subtotal: Number,
       total: Number,
+
+      // MRP - Sale Price
+      product_discount: Number,
+
+      // Coupon discount actually deducted
+      coupon_discount: Number,
+
+      // Backward compatibility
       discount: Number,
+
+      // COD fee
+      cod_charge: Number,
+
       payable: Number,
+      final_payable: Number,
     },
 
     discount_amount: { type: Number, default: 0.0 },

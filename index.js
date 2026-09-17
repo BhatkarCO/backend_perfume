@@ -76,7 +76,9 @@ app.use(cors(corsOptions));
 // Use cookie parser middleware
 app.use(cookieParser());
 
+//webhooks
 app.use("/api/webhooks/razorpay", razorpayWebhookRoutes);
+app.use("/api/webhooks/shiprocket", shiprocketWebhookRoutes);
 
 // JSON Request Parser
 app.use(express.json());
@@ -97,6 +99,7 @@ const apiLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
 app.use("/api", apiLimiter);
 
 // API Routing Mapping
@@ -104,7 +107,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/wishlist", wishlistRoutes);
-app.use("/api/webhooks/shiprocket", shiprocketWebhookRoutes);
+
 app.use("/api/webhooks/shipping", shiprocketWebhookRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/addresses", addressRoutes);
@@ -123,10 +126,8 @@ app.get("/health", (req, res) => {
 });
 
 // Root route
-app.get("/health", (req, res) => {
-  res
-    .status(200)
-    .json({ message: "Bhatkar Perfumes backend server is running." });
+app.get("/", (req, res) => {
+  res.json({ message: "Welcome to Bhatkar Perfumes backend server." });
 });
 
 // 404 Route handler

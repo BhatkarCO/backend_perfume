@@ -3,7 +3,28 @@ import Order from "../models/Order.js";
 // ----------------------------------------
 // Convert Shiprocket status → our DB status
 // ----------------------------------------
-const normalizeShiprocketStatus = (status) => {
+const normalizeShiprocketStatus = (status, statusId) => {
+  const numericStatusId = Number(statusId);
+
+  const statusIdMap = {
+    1: "AWB_ASSIGNED",
+    3: "PICKUP_SCHEDULED",
+    6: "IN_TRANSIT",
+    7: "DELIVERED",
+    8: "CANCELLED",
+    9: "RTO",
+    10: "RTO_DELIVERED",
+    12: "LOST",
+    17: "OUT_FOR_DELIVERY",
+    18: "IN_TRANSIT",
+    42: "PICKED_UP",
+    45: "CANCELLED",
+  };
+
+  if (statusIdMap[numericStatusId]) {
+    return statusIdMap[numericStatusId];
+  }
+
   if (!status) return null;
 
   const normalized = String(status)
@@ -12,15 +33,12 @@ const normalizeShiprocketStatus = (status) => {
     .replace(/[\s-]+/g, "_");
 
   const statusMap = {
-    // AWB / Assignment
     AWB_ASSIGNED: "AWB_ASSIGNED",
     AWB_ASSIGNMENT: "AWB_ASSIGNED",
 
-    // Pickup
     PICKUP_SCHEDULED: "PICKUP_SCHEDULED",
     PICKUP_GENERATED: "PICKUP_SCHEDULED",
 
-    // Shipment movement
     PICKED_UP: "PICKED_UP",
     PICKEDUP: "PICKED_UP",
 
@@ -32,16 +50,14 @@ const normalizeShiprocketStatus = (status) => {
 
     DELIVERED: "DELIVERED",
 
-    // Failed / Cancelled
     CANCELLED: "CANCELLED",
     CANCELED: "CANCELLED",
+    CANCELLED_BEFORE_DISPATCHED: "CANCELLED",
 
-    // RTO
     RTO: "RTO",
     RTO_INITIATED: "RTO",
     RTO_DELIVERED: "RTO_DELIVERED",
 
-    // Other
     LOST: "LOST",
   };
 
@@ -75,6 +91,12 @@ export const handleShiprocketWebhook = async (req, res) => {
     // ----------------------------------------
     // Verify Shiprocket webhook token
     // ----------------------------------------
+    console.log("SHIPROCKET WEBHOOK:", JSON.stringify(req.body, null, 2));
+    console.log("Shiprocket status:", {
+      rawStatus,
+      rawStatusId,
+      normalizedStatus,
+    });
 
     const receivedToken = req.headers["x-api-key"];
     const expectedToken = process.env.SHIPROCKET_WEBHOOK_TOKEN;
@@ -118,19 +140,28 @@ export const handleShiprocketWebhook = async (req, res) => {
     // ----------------------------------------
 
     const rawStatus =
-      payload?.current_status ||
-      payload?.status ||
-      payload?.shipment_status ||
-      payload?.data?.status ||
+      payload?.current_status ??
+      payload?.status ??
+      payload?.shipment_status ??
+      payload?.data?.current_status ??
+      payload?.data?.status ??
+      payload?.data?.shipment_status ??
       null;
 
-    const normalizedStatus = normalizeShiprocketStatus(rawStatus);
+    const rawStatusId =
+      payload?.current_status_id ??
+      payload?.shipment_status_id ??
+      payload?.data?.current_status_id ??
+      payload?.data?.shipment_status_id ??
+      null;
+
+    const normalizedStatus = normalizeShiprocketStatus(rawStatus, rawStatusId);
 
     // ----------------------------------------
     // Validate identifiers
     // ----------------------------------------
 
-    if (!awb && !shipmentId) {
+    if (!awb && !shipmentId && !shiprocketOrderId) {
       console.warn("Shiprocket webhook missing AWB and shipment ID");
 
       return res.status(200).json({
@@ -139,6 +170,11 @@ export const handleShiprocketWebhook = async (req, res) => {
       });
     }
 
+    if (!order && shiprocketOrderId) {
+      order = await Order.findOne({
+        shiprocket_order_id: String(shiprocketOrderId),
+      });
+    }
     // ----------------------------------------
     // Find local order
     // ----------------------------------------

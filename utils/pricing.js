@@ -1,27 +1,55 @@
 import { GST_PERCENTAGE } from "../config/pricing.js";
 
-export const calculateGST = (productPrice) => {
-  const price = Number(productPrice) || 0;
+/**
+ * GST amount extracted FROM a GST-inclusive price.
+ *
+ * Example:
+ * ₹220 inclusive of 18% GST
+ * GST = ₹220 × 18 / 118 = ₹33.56
+ */
+export const calculateIncludedGST = (inclusivePrice) => {
+  const price = Number(inclusivePrice) || 0;
 
-  return Number((price * (GST_PERCENTAGE / 100)).toFixed(2));
+  return Number(
+    (price * (GST_PERCENTAGE / (100 + GST_PERCENTAGE))).toFixed(2),
+  );
 };
 
+/**
+ * Calculate final customer-facing order amount.
+ *
+ * IMPORTANT:
+ * productPrice is already GST-inclusive.
+ * GST is NOT added here.
+ *
+ * discount = coupon discount only.
+ * productDiscount is informational only.
+ */
 export const calculateFinalAmount = ({
   productPrice,
   shippingCharge,
   discount = 0,
+  productDiscount = 0,
+  codCharge = 0,
 }) => {
   const productPriceValue = Number(productPrice) || 0;
   const shippingChargeValue = Number(shippingCharge) || 0;
-  const discountValue = Number(discount) || 0;
+  const couponDiscountValue = Number(discount) || 0;
+  const productDiscountValue = Number(productDiscount) || 0;
+  const codChargeValue = Number(codCharge) || 0;
 
-  const gst = calculateGST(productPriceValue);
+  // Sale price is already GST-inclusive.
+  const subtotal = Number(productPriceValue.toFixed(2));
 
-  const subtotal = Number((productPriceValue + shippingChargeValue).toFixed(2));
-
-  const total = Number((subtotal + gst).toFixed(2));
-
-  const payable = Number(Math.max(0, total - discountValue).toFixed(2));
+  // Coupon is the only discount actually deducted.
+  const total = Number(
+    (
+      subtotal -
+      couponDiscountValue +
+      shippingChargeValue +
+      codChargeValue
+    ).toFixed(2),
+  );
 
   return {
     product_price: productPriceValue,
@@ -34,15 +62,26 @@ export const calculateFinalAmount = ({
     shipping_charge: shippingChargeValue,
 
     gst_percentage: GST_PERCENTAGE,
-    gst_amount: gst,
 
-    gst,
-    tax: gst,
-    taxes: gst,
+    // GST is contained inside the selling price.
+    gst_amount: calculateIncludedGST(subtotal),
+    gst: calculateIncludedGST(subtotal),
+    tax: calculateIncludedGST(subtotal),
+    taxes: calculateIncludedGST(subtotal),
 
     subtotal,
     total,
-    discount: discountValue,
-    payable,
+
+    // Display-only MRP discount.
+    product_discount: productDiscountValue,
+
+    // Actual deducted coupon discount.
+    coupon_discount: couponDiscountValue,
+    discount: couponDiscountValue,
+
+    cod_charge: codChargeValue,
+
+    payable: total,
+    final_payable: total,
   };
 };
