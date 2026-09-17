@@ -92,15 +92,8 @@ const statusPriority = {
 // Shiprocket Webhook
 // ----------------------------------------
 export const handleShiprocketWebhook = async (req, res) => {
-  console.log("CONTENT-TYPE:", req.headers["content-type"]);
-  console.log("BODY:", req.body);
   try {
     const payload = req.body;
-
-    // ----------------------------------------
-    // Log webhook payload
-    // ----------------------------------------
-    console.log("SHIPROCKET WEBHOOK:", JSON.stringify(payload, null, 2));
 
     // ----------------------------------------
     // Verify Shiprocket webhook token
@@ -178,18 +171,6 @@ export const handleShiprocketWebhook = async (req, res) => {
     // Normalize status
     // ----------------------------------------
     const normalizedStatus = normalizeShiprocketStatus(rawStatus, rawStatusId);
-
-    console.log("Shiprocket status:", {
-      rawStatus,
-      rawStatusId,
-      normalizedStatus,
-    });
-
-    console.log("Shiprocket identifiers:", {
-      awb,
-      shipmentId,
-      shiprocketOrderId,
-    });
 
     // ----------------------------------------
     // Validate identifiers

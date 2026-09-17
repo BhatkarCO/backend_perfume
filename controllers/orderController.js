@@ -96,7 +96,6 @@ const buildShiprocketOrderPayload = ({
   codCharge = 0,
 }) => {
   const orderDate = new Date().toISOString().slice(0, 19).replace("T", " ");
-  console.log("========== BUILD PAYLOAD ITEMS ==========");
   console.log(JSON.stringify(items, null, 2));
   return {
     order_id: localOrderId,
@@ -121,8 +120,6 @@ const buildShiprocketOrderPayload = ({
     shipping_email: user.email,
     shipping_phone: address.phone,
     order_items: items.map((item) => {
-      console.log("Shiprocket item:", item);
-
       const doc = item._doc || item;
 
       const quantity = Number(doc.quantity) || 0;
@@ -211,8 +208,6 @@ const registerShiprocketShipment = async ({
     const normalizedItems = enrichedItems.map((item) =>
       item.toObject ? item.toObject() : item,
     );
-    console.log("========== ENRICHED ITEMS ==========");
-    console.log(JSON.stringify(enrichedItems, null, 2));
 
     const payload = buildShiprocketOrderPayload({
       localOrderId: order.id,
@@ -227,10 +222,7 @@ const registerShiprocketShipment = async ({
     });
     let createResponse;
     try {
-      console.log("========== FINAL SHIPROCKET PAYLOAD ==========");
-      console.log(JSON.stringify(payload, null, 2));
       createResponse = await createShiprocketOrder(payload);
-      console.log("========== SHIPROCKET CREATE RESPONSE ==========");
     } catch (error) {
       const errorData = error.response?.data || error.data || null;
       const candidateLocations =
@@ -300,12 +292,9 @@ const registerShiprocketShipment = async ({
     if (order.courier?.courier_company_id) {
       assignRequest.courier_id = order.courier.courier_company_id;
     }
-    console.debug("Shiprocket assign AWB request:", assignRequest);
 
     const assignResponse = await assignShiprocketAwb(assignRequest);
 
-    console.log("========== SHIPROCKET ASSIGN AWB RESPONSE ==========");
-    console.log(JSON.stringify(assignResponse, null, 2));
 
     // Shiprocket response structure:
     // assignResponse.response.data.awb_code
@@ -342,12 +331,6 @@ const registerShiprocketShipment = async ({
       throw new Error("AWB not Assigned");
     }
 
-    console.log("========== AWB ASSIGNED SUCCESSFULLY ==========");
-    console.log("AWB:", awbCode);
-    console.log("Courier:", courierName);
-    console.log("Courier Company ID:", courierCompanyId);
-    console.log("Shipment ID:", assignedShipmentId);
-
     // Save Shiprocket details
     order.shiprocket_awb = String(awbCode);
     order.shiprocket_courier_name = courierName;
@@ -359,26 +342,13 @@ const registerShiprocketShipment = async ({
 
     await order.save();
 
-    console.log("========== SHIPROCKET DETAILS SAVED ==========");
-    console.log({
-      shiprocket_order_id: order.shiprocket_order_id,
-      shiprocket_shipment_id: order.shiprocket_shipment_id,
-      shiprocket_awb: order.shiprocket_awb,
-      shiprocket_courier_name: order.shiprocket_courier_name,
-      shiprocket_status: order.shiprocket_status,
-    });
-
     return order;
   } catch (error) {
-    console.error("========== SHIPROCKET ERROR ==========");
-    console.error("Status:", error.response?.status);
-    console.error("Headers:", error.response?.headers);
-    console.error("Response:", JSON.stringify(error.response?.data, null, 2));
-    console.error("Message:", error.message);
-
-    if (error.response?.config?.url) {
-      console.error("URL:", error.response.config.url);
-    }
+    console.error("Shiprocket API error:", {
+      status: error.response?.status,
+      message: error.message,
+      response: error.response?.data,
+    });
 
     return order;
   }
@@ -743,7 +713,6 @@ export const createOrder = async (req, res) => {
       cod: paymentMethod === "COD" ? 1 : 0,
       weight: SHIPROCKET_CONFIG.defaultWeight,
     });
-    console.log("🚚 Shiprocket serviceability checked");
 
     // -----------------------------
     // Get Recommended Courier
