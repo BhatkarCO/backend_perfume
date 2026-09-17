@@ -20,6 +20,7 @@ import InventoryLog from "../models/InventoryLog.js";
 import razorpayInstance, { isMockMode } from "../config/razorpay.js";
 import { sendEmail } from "../utils/email.js";
 const COD_CHARGE = 65;
+const FREE_SHIPPING_MIN_ITEMS = 2;
 
 /**
  * Validate Coupon
@@ -295,7 +296,6 @@ const registerShiprocketShipment = async ({
 
     const assignResponse = await assignShiprocketAwb(assignRequest);
 
-
     // Shiprocket response structure:
     // assignResponse.response.data.awb_code
 
@@ -506,7 +506,15 @@ export const previewOrder = async (req, res) => {
       });
     }
 
-    const shippingCharge = Number(recommendedCourier.freight_charge);
+    const totalQuantity = items.reduce(
+      (sum, item) => sum + Number(item.quantity || 0),
+      0,
+    );
+
+    const shippingCharge =
+      totalQuantity >= FREE_SHIPPING_MIN_ITEMS
+        ? 0
+        : Number(recommendedCourier.freight_charge);
 
     // -----------------------------------
     // Pricing
@@ -736,7 +744,15 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    const shippingCharge = Number(recommendedCourier.freight_charge);
+    const totalQuantity = items.reduce(
+      (sum, item) => sum + Number(item.quantity || 0),
+      0,
+    );
+
+    const shippingCharge =
+      totalQuantity >= FREE_SHIPPING_MIN_ITEMS
+        ? 0
+        : Number(recommendedCourier.freight_charge);
 
     // 2. Fetch products and calculate total cost in a single batch query
     const productIds = items.map((item) => item.productId);
