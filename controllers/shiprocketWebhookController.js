@@ -9,6 +9,11 @@ const normalizeShiprocketStatus = (status, statusId) => {
   const statusIdMap = {
     1: "AWB_ASSIGNED",
     3: "PICKUP_SCHEDULED",
+
+    // Shiprocket webhook:
+    // current_status_id = 5 when current_status = CANCELED
+    5: "CANCELLED",
+
     6: "IN_TRANSIT",
     7: "DELIVERED",
     8: "CANCELLED",
@@ -88,16 +93,19 @@ const statusPriority = {
 // ----------------------------------------
 export const handleShiprocketWebhook = async (req, res) => {
   try {
+    const payload = req.body;
+
+    // ----------------------------------------
+    // Log webhook payload
+    // ----------------------------------------
+    console.log(
+      "SHIPROCKET WEBHOOK:",
+      JSON.stringify(payload, null, 2),
+    );
+
     // ----------------------------------------
     // Verify Shiprocket webhook token
     // ----------------------------------------
-    console.log("SHIPROCKET WEBHOOK:", JSON.stringify(req.body, null, 2));
-    console.log("Shiprocket status:", {
-      rawStatus,
-      rawStatusId,
-      normalizedStatus,
-    });
-
     const receivedToken = req.headers["x-api-key"];
     const expectedToken = process.env.SHIPROCKET_WEBHOOK_TOKEN;
 
@@ -111,34 +119,41 @@ export const handleShiprocketWebhook = async (req, res) => {
       });
     }
 
-    const payload = req.body;
-
     // ----------------------------------------
     // Extract AWB
     // ----------------------------------------
-
     const awb =
-      payload?.awb ||
-      payload?.awb_code ||
-      payload?.shipment?.awb ||
-      payload?.data?.awb ||
-      payload?.data?.awb_code ||
+      payload?.awb ??
+      payload?.awb_code ??
+      payload?.shipment?.awb ??
+      payload?.data?.awb ??
+      payload?.data?.awb_code ??
       null;
 
     // ----------------------------------------
     // Extract Shipment ID
     // ----------------------------------------
-
     const shipmentId =
-      payload?.shipment_id ||
-      payload?.shipment?.shipment_id ||
-      payload?.data?.shipment_id ||
+      payload?.shipment_id ??
+      payload?.shipment?.shipment_id ??
+      payload?.data?.shipment_id ??
+      null;
+
+    // ----------------------------------------
+    // Extract Shiprocket Order ID
+    // ----------------------------------------
+    const shiprocketOrderId =
+      payload?.sr_order_id ??
+      payload?.order_id ??
+      payload?.shiprocket_order_id ??
+      payload?.data?.sr_order_id ??
+      payload?.data?.order_id ??
+      payload?.data?.shiprocket_order_id ??
       null;
 
     // ----------------------------------------
     // Extract Status
     // ----------------------------------------
-
     const rawStatus =
       payload?.current_status ??
       payload?.status ??
@@ -148,21 +163,45 @@ export const handleShiprocketWebhook = async (req, res) => {
       payload?.data?.shipment_status ??
       null;
 
+    // ----------------------------------------
+    // Extract Status ID
+    // ----------------------------------------
     const rawStatusId =
       payload?.current_status_id ??
       payload?.shipment_status_id ??
+      payload?.status_id ??
       payload?.data?.current_status_id ??
       payload?.data?.shipment_status_id ??
+      payload?.data?.status_id ??
       null;
 
-    const normalizedStatus = normalizeShiprocketStatus(rawStatus, rawStatusId);
+    // ----------------------------------------
+    // Normalize status
+    // ----------------------------------------
+    const normalizedStatus = normalizeShiprocketStatus(
+      rawStatus,
+      rawStatusId,
+    );
+
+    console.log("Shiprocket status:", {
+      rawStatus,
+      rawStatusId,
+      normalizedStatus,
+    });
+
+    console.log("Shiprocket identifiers:", {
+      awb,
+      shipmentId,
+      shiprocketOrderId,
+    });
 
     // ----------------------------------------
     // Validate identifiers
     // ----------------------------------------
-
     if (!awb && !shipmentId && !shiprocketOrderId) {
-      console.warn("Shiprocket webhook missing AWB and shipment ID");
+      console.warn(
+        "Shiprocket webhook missing AWB, shipment ID, and Shiprocket order ID",
+      );
 
       return res.status(200).json({
         received: true,
@@ -170,15 +209,9 @@ export const handleShiprocketWebhook = async (req, res) => {
       });
     }
 
-    if (!order && shiprocketOrderId) {
-      order = await Order.findOne({
-        shiprocket_order_id: String(shiprocketOrderId),
-      });
-    }
     // ----------------------------------------
     // Find local order
     // ----------------------------------------
-
     let order = null;
 
     // First try AWB
@@ -195,15 +228,25 @@ export const handleShiprocketWebhook = async (req, res) => {
       });
     }
 
+    // If not found, try Shiprocket order ID
+    if (!order && shiprocketOrderId) {
+      order = await Order.findOne({
+        shiprocket_order_id: String(shiprocketOrderId),
+      });
+    }
+
     // ----------------------------------------
     // Order not found
     // ----------------------------------------
-
     if (!order) {
-      console.warn("No local order found for Shiprocket webhook:", {
-        awb,
-        shipmentId,
-      });
+      console.warn(
+        "No local order found for Shiprocket webhook:",
+        {
+          awb,
+          shipmentId,
+          shiprocketOrderId,
+        },
+      );
 
       return res.status(200).json({
         received: true,
@@ -214,7 +257,6 @@ export const handleShiprocketWebhook = async (req, res) => {
     // ----------------------------------------
     // Update Shiprocket information
     // ----------------------------------------
-
     if (awb) {
       order.shiprocket_awb = String(awb);
     }
@@ -223,23 +265,30 @@ export const handleShiprocketWebhook = async (req, res) => {
       order.shiprocket_shipment_id = Number(shipmentId);
     }
 
+    if (shiprocketOrderId) {
+      order.shiprocket_order_id = String(shiprocketOrderId);
+    }
+
     // ----------------------------------------
     // Update status
     // ----------------------------------------
-
     if (normalizedStatus) {
       const currentStatus = order.shiprocket_status;
 
-      const currentPriority = statusPriority[currentStatus] || 0;
+      const currentPriority =
+        statusPriority[currentStatus] || 0;
 
-      const newPriority = statusPriority[normalizedStatus] || 0;
+      const newPriority =
+        statusPriority[normalizedStatus] || 0;
 
       // Only update if this is not an older status
       if (newPriority >= currentPriority) {
         order.shiprocket_status = normalizedStatus;
 
         console.log(
-          `Status updated: ${currentStatus || "NONE"} → ${normalizedStatus}`,
+          `Status updated: ${
+            currentStatus || "NONE"
+          } → ${normalizedStatus}`,
         );
       } else {
         console.warn(
@@ -247,19 +296,27 @@ export const handleShiprocketWebhook = async (req, res) => {
         );
       }
     } else {
-      console.warn(`Unknown Shiprocket status received: "${rawStatus}"`);
+      console.warn(
+        `Unknown Shiprocket status received: "${rawStatus}" (ID: ${rawStatusId})`,
+      );
     }
 
     // ----------------------------------------
     // Save order
     // ----------------------------------------
-
     await order.save();
+
+    console.log("Shiprocket order saved:", {
+      orderId: order._id,
+      shiprocketOrderId: order.shiprocket_order_id,
+      shipmentId: order.shiprocket_shipment_id,
+      awb: order.shiprocket_awb,
+      status: order.shiprocket_status,
+    });
 
     // ----------------------------------------
     // Response
     // ----------------------------------------
-
     return res.status(200).json({
       received: true,
       updated: true,
@@ -271,7 +328,6 @@ export const handleShiprocketWebhook = async (req, res) => {
       error.response?.data || error.message,
     );
 
-    // Acknowledge webhook
     return res.status(200).json({
       received: true,
       updated: false,
