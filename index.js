@@ -75,14 +75,13 @@ app.use(cors(corsOptions));
 
 // Use cookie parser middleware
 app.use(cookieParser());
+// JSON Request Parser
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 //webhooks
 app.use("/api/webhooks/razorpay", razorpayWebhookRoutes);
 app.use("/api/webhooks/shiprocket", shiprocketWebhookRoutes);
-
-// JSON Request Parser
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 // Serve static upload fallback directory & public assets
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads")));

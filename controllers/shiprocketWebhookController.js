@@ -92,16 +92,15 @@ const statusPriority = {
 // Shiprocket Webhook
 // ----------------------------------------
 export const handleShiprocketWebhook = async (req, res) => {
+  console.log("CONTENT-TYPE:", req.headers["content-type"]);
+  console.log("BODY:", req.body);
   try {
     const payload = req.body;
 
     // ----------------------------------------
     // Log webhook payload
     // ----------------------------------------
-    console.log(
-      "SHIPROCKET WEBHOOK:",
-      JSON.stringify(payload, null, 2),
-    );
+    console.log("SHIPROCKET WEBHOOK:", JSON.stringify(payload, null, 2));
 
     // ----------------------------------------
     // Verify Shiprocket webhook token
@@ -178,10 +177,7 @@ export const handleShiprocketWebhook = async (req, res) => {
     // ----------------------------------------
     // Normalize status
     // ----------------------------------------
-    const normalizedStatus = normalizeShiprocketStatus(
-      rawStatus,
-      rawStatusId,
-    );
+    const normalizedStatus = normalizeShiprocketStatus(rawStatus, rawStatusId);
 
     console.log("Shiprocket status:", {
       rawStatus,
@@ -239,14 +235,11 @@ export const handleShiprocketWebhook = async (req, res) => {
     // Order not found
     // ----------------------------------------
     if (!order) {
-      console.warn(
-        "No local order found for Shiprocket webhook:",
-        {
-          awb,
-          shipmentId,
-          shiprocketOrderId,
-        },
-      );
+      console.warn("No local order found for Shiprocket webhook:", {
+        awb,
+        shipmentId,
+        shiprocketOrderId,
+      });
 
       return res.status(200).json({
         received: true,
@@ -275,20 +268,16 @@ export const handleShiprocketWebhook = async (req, res) => {
     if (normalizedStatus) {
       const currentStatus = order.shiprocket_status;
 
-      const currentPriority =
-        statusPriority[currentStatus] || 0;
+      const currentPriority = statusPriority[currentStatus] || 0;
 
-      const newPriority =
-        statusPriority[normalizedStatus] || 0;
+      const newPriority = statusPriority[normalizedStatus] || 0;
 
       // Only update if this is not an older status
       if (newPriority >= currentPriority) {
         order.shiprocket_status = normalizedStatus;
 
         console.log(
-          `Status updated: ${
-            currentStatus || "NONE"
-          } → ${normalizedStatus}`,
+          `Status updated: ${currentStatus || "NONE"} → ${normalizedStatus}`,
         );
       } else {
         console.warn(
