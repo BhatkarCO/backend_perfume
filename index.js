@@ -22,6 +22,7 @@ import shiprocketRoutes from "./routes/shiprocketRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
 import cookieParser from "cookie-parser";
+import instagramRoutes from "./routes/instagramRoutes.js";
 
 dotenv.config();
 
@@ -113,6 +114,7 @@ app.use("/api/addresses", addressRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/shiprocket", shiprocketRoutes);
+app.use("/api/instagram", instagramRoutes);
 app.use("/api/general", contactRoutes);
 app.use("/api/chat", chatRoutes);
 
