@@ -15,6 +15,7 @@ import wishlistRoutes from "./routes/wishlistRoutes.js";
 import shiprocketWebhookRoutes from "./routes/shiprocketWebhookRoutes.js";
 import razorpayWebhookRoutes from "./routes/razorpayWebhookRoutes.js";
 import orderRoutes from "./routes/orderRoutes.js";
+import couponRoutes from "./routes/couponRoutes.js";
 import addressRoutes from "./routes/addressRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
@@ -110,6 +111,7 @@ app.use("/api/wishlist", wishlistRoutes);
 
 app.use("/api/webhooks/shipping", shiprocketWebhookRoutes);
 app.use("/api/orders", orderRoutes);
+app.use("/api/coupons", couponRoutes);
 app.use("/api/addresses", addressRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/admin", adminRoutes);
