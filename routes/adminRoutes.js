@@ -13,6 +13,10 @@ import {
   getAdminReports,
   forgotAdminPassword,
   resetAdminPassword,
+  createCoupon,
+  getAdminCoupons,
+  toggleCouponStatus,
+  deleteCoupon,
 } from "../controllers/adminController.js";
 import { verifyToken, isAdmin } from "../middleware/auth.js";
 import upload from "../middleware/upload.js";
@@ -25,6 +29,16 @@ router.post("/reset-password", resetAdminPassword);
 
 // Apply auth protection and admin check to all admin routes
 router.use(verifyToken, isAdmin);
+
+// Coupons
+
+router.post("/coupons", createCoupon);
+
+router.get("/coupons", getAdminCoupons);
+
+router.patch("/coupons/:couponId/status", toggleCouponStatus);
+
+router.delete("/coupons/:couponId", deleteCoupon);
 
 // Products
 router.post("/products", upload.array("images", 10), addProduct);

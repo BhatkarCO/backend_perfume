@@ -2,6 +2,7 @@ import Review from "../models/Review.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
 import User from "../models/User.js";
+import Coupon from "../models/Coupon.js";
 import bcrypt from "bcryptjs";
 import InventoryLog from "../models/InventoryLog.js";
 import { uploadAsset } from "../config/cloudinary.js";
@@ -928,6 +929,202 @@ export const resetAdminPassword = async (req, res) => {
 
     res.status(500).json({
       message: "Server Error",
+    });
+  }
+};
+
+// --- COUPON MANAGEMENT ---
+
+/**
+ * Create Coupon (Admin only)
+ */
+export const createCoupon = async (req, res) => {
+  try {
+    const {
+      code,
+      discount_percentage,
+      max_discount,
+      min_purchase,
+      expires_at,
+      active = true,
+    } = req.body;
+
+    if (!code || discount_percentage === undefined) {
+      return res.status(400).json({
+        message: "Coupon code and discount percentage are required.",
+      });
+    }
+
+    const normalizedCode = String(code).trim().toUpperCase();
+
+    if (!/^[A-Z0-9_-]+$/.test(normalizedCode)) {
+      return res.status(400).json({
+        message:
+          "Coupon code can contain only letters, numbers, hyphens, and underscores.",
+      });
+    }
+
+    const discount = Number(discount_percentage);
+    const minPurchase = Number(min_purchase || 0);
+    const maxDiscount =
+      max_discount !== undefined && max_discount !== ""
+        ? Number(max_discount)
+        : undefined;
+
+    if (!Number.isFinite(discount) || discount <= 0 || discount > 100) {
+      return res.status(400).json({
+        message: "Discount percentage must be between 1 and 100.",
+      });
+    }
+
+    if (!Number.isFinite(minPurchase) || minPurchase < 0) {
+      return res.status(400).json({
+        message: "Minimum purchase cannot be negative.",
+      });
+    }
+
+    if (
+      maxDiscount !== undefined &&
+      (!Number.isFinite(maxDiscount) || maxDiscount <= 0)
+    ) {
+      return res.status(400).json({
+        message: "Maximum discount must be greater than 0.",
+      });
+    }
+
+    let expiryDate = null;
+
+    if (expires_at) {
+      expiryDate = new Date(expires_at);
+
+      if (Number.isNaN(expiryDate.getTime())) {
+        return res.status(400).json({
+          message: "Invalid expiry date.",
+        });
+      }
+
+      if (expiryDate <= new Date()) {
+        return res.status(400).json({
+          message: "Expiry date must be in the future.",
+        });
+      }
+    }
+
+    const existingCoupon = await Coupon.findOne({
+      code: normalizedCode,
+    });
+
+    if (existingCoupon) {
+      return res.status(409).json({
+        message: "A coupon with this code already exists.",
+      });
+    }
+
+    const coupon = new Coupon({
+      code: normalizedCode,
+      discount_percentage: discount,
+      max_discount: maxDiscount,
+      min_purchase: minPurchase,
+      active: active === true || active === "true",
+      expires_at: expiryDate,
+    });
+
+    await coupon.save();
+
+    return res.status(201).json({
+      message: "Coupon created successfully.",
+      coupon,
+    });
+  } catch (error) {
+    console.error("Create coupon error:", error);
+
+    return res.status(500).json({
+      message: "Error creating coupon.",
+    });
+  }
+};
+
+/**
+ * Get all Coupons (Admin only)
+ */
+export const getAdminCoupons = async (req, res) => {
+  try {
+    const coupons = await Coupon.find()
+      .sort({ created_at: -1 })
+      .lean();
+
+    const formattedCoupons = coupons.map((coupon) => ({
+      ...coupon,
+      id: coupon._id.toString(),
+    }));
+
+    return res.status(200).json(formattedCoupons);
+  } catch (error) {
+    console.error("Get admin coupons error:", error);
+
+    return res.status(500).json({
+      message: "Error retrieving coupons.",
+    });
+  }
+};
+
+/**
+ * Toggle Coupon Active / Inactive (Admin only)
+ */
+export const toggleCouponStatus = async (req, res) => {
+  try {
+    const { couponId } = req.params;
+
+    const coupon = await Coupon.findById(couponId);
+
+    if (!coupon) {
+      return res.status(404).json({
+        message: "Coupon not found.",
+      });
+    }
+
+    coupon.active = !coupon.active;
+
+    await coupon.save();
+
+    return res.status(200).json({
+      message: coupon.active
+        ? "Coupon activated successfully."
+        : "Coupon deactivated successfully.",
+      coupon,
+    });
+  } catch (error) {
+    console.error("Toggle coupon status error:", error);
+
+    return res.status(500).json({
+      message: "Error updating coupon status.",
+    });
+  }
+};
+
+/**
+ * Delete Coupon (Admin only)
+ */
+export const deleteCoupon = async (req, res) => {
+  try {
+    const { couponId } = req.params;
+
+    const coupon = await Coupon.findByIdAndDelete(couponId);
+
+    if (!coupon) {
+      return res.status(404).json({
+        message: "Coupon not found.",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Coupon deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete coupon error:", error);
+
+    return res.status(500).json({
+      message: "Error deleting coupon.",
     });
   }
 };
