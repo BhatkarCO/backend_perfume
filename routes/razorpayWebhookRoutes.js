@@ -1,7 +1,11 @@
 import express from "express";
 import crypto from "crypto";
 import Order from "../models/Order.js";
-import Payment from "../models/Payment.js";
+import {
+  captureAuthorizedPayment,
+  finalizeSuccessfulPayment,
+  markPaymentFailed,
+} from "../services/paymentService.js";
 
 const router = express.Router();
 
@@ -14,137 +18,201 @@ router.post(
       const signature = req.headers["x-razorpay-signature"];
       const eventId = req.headers["x-razorpay-event-id"];
 
+      // ----------------------------------------
+      // 1. Webhook secret
+      // ----------------------------------------
+
       if (!webhookSecret) {
         console.error("RAZORPAY_WEBHOOK_SECRET is not configured");
+
         return res.status(500).json({
-          message: "Webhook secret is not configured",
+          message: "Webhook secret is not configured.",
         });
       }
+
+      // ----------------------------------------
+      // 2. Signature must exist
+      // ----------------------------------------
 
       if (!signature) {
         return res.status(400).json({
-          message: "Missing Razorpay webhook signature",
+          message: "Missing Razorpay webhook signature.",
         });
       }
 
-      // IMPORTANT:
-      // req.body must be the raw Buffer.
+      // ----------------------------------------
+      // 3. Validate raw-body HMAC signature
+      // ----------------------------------------
+
+      if (!Buffer.isBuffer(req.body)) {
+        console.error("Razorpay webhook body is not a raw Buffer.");
+
+        return res.status(400).json({
+          message: "Invalid webhook body.",
+        });
+      }
+
       const expectedSignature = crypto
         .createHmac("sha256", webhookSecret)
         .update(req.body)
         .digest("hex");
 
-      const receivedBuffer = Buffer.from(signature, "utf8");
+      const receivedBuffer = Buffer.from(String(signature), "utf8");
       const expectedBuffer = Buffer.from(expectedSignature, "utf8");
 
-      if (
-        receivedBuffer.length !== expectedBuffer.length ||
-        !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)
-      ) {
-        console.error("Invalid Razorpay webhook signature");
+      const signatureValid =
+        receivedBuffer.length === expectedBuffer.length &&
+        crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+
+      if (!signatureValid) {
+        console.error("Invalid Razorpay webhook signature.");
 
         return res.status(400).json({
-          message: "Invalid webhook signature",
+          message: "Invalid webhook signature.",
         });
       }
 
-      const event = JSON.parse(req.body.toString("utf8"));
+      // ----------------------------------------
+      // 4. Parse webhook payload
+      // ----------------------------------------
+
+      let event;
+
+      try {
+        event = JSON.parse(req.body.toString("utf8"));
+      } catch (parseError) {
+        console.error("Invalid Razorpay webhook JSON:", parseError.message);
+
+        return res.status(400).json({
+          message: "Invalid webhook payload.",
+        });
+      }
+
+      const eventName = event?.event;
 
       console.log(
-        `Razorpay webhook received: ${event.event}`,
-        eventId ? `(${eventId})` : ""
+        `Razorpay webhook received: ${eventName}`,
+        eventId ? `(${eventId})` : "",
       );
 
-      /*
-       * Acknowledge Razorpay after signature verification.
-       *
-       * For a simple MongoDB application this keeps the endpoint responsive.
-       */
-      res.status(200).json({
+      // ----------------------------------------
+      // 5. Handle supported events
+      // ----------------------------------------
+
+      switch (eventName) {
+        case "payment.authorized":
+          await handlePaymentAuthorized(event);
+          break;
+
+        case "payment.captured":
+          await handlePaymentCaptured(event);
+          break;
+
+        case "payment.failed":
+          await handlePaymentFailed(event);
+          break;
+
+        case "order.paid":
+          /*
+           * payment.captured is the event we use for
+           * successful payment finalization.
+           *
+           * order.paid can arrive for the same payment,
+           * so we intentionally do not finalize the order
+           * a second time from this event.
+           */
+          console.log("Ignoring order.paid webhook event.");
+          break;
+
+        default:
+          console.log(`Ignoring Razorpay event: ${eventName}`);
+          break;
+      }
+
+      return res.status(200).json({
         success: true,
       });
-
-      // Process asynchronously after acknowledging Razorpay.
-      setImmediate(async () => {
-        try {
-          await processRazorpayEvent(event, eventId);
-        } catch (error) {
-          console.error(
-            "Razorpay webhook processing error:",
-            error
-          );
-        }
-      });
     } catch (error) {
-      console.error("Razorpay webhook error:", error);
+      console.error("Razorpay webhook processing error:", error.message);
 
       if (!res.headersSent) {
         return res.status(400).json({
-          message: "Invalid webhook payload",
+          message: "Unable to process Razorpay webhook.",
         });
       }
     }
-  }
+  },
 );
 
-async function processRazorpayEvent(event, eventId) {
-  const paymentEntity =
-    event.payload?.payment?.entity;
+/**
+ * Capture an authorized payment only while its reserved inventory is active.
+ */
+async function handlePaymentAuthorized(event) {
+  const payment = event?.payload?.payment?.entity;
 
-  const orderEntity =
-    event.payload?.order?.entity;
-
-  switch (event.event) {
-    case "payment.captured": {
-      if (!paymentEntity) {
-        console.warn("payment.captured without payment entity");
-        return;
-      }
-
-      await handlePaymentCaptured(paymentEntity, eventId);
-      break;
-    }
-
-    case "order.paid": {
-      if (!paymentEntity && !orderEntity) {
-        console.warn("order.paid without payment/order entity");
-        return;
-      }
-
-      await handleOrderPaid(
-        paymentEntity,
-        orderEntity,
-        eventId
-      );
-
-      break;
-    }
-
-    case "payment.failed": {
-      if (!paymentEntity) {
-        console.warn("payment.failed without payment entity");
-        return;
-      }
-
-      await handlePaymentFailed(paymentEntity, eventId);
-      break;
-    }
-
-    default:
-      console.log(
-        `Ignoring Razorpay event: ${event.event}`
-      );
+  if (
+    !payment ||
+    payment.status !== "authorized" ||
+    !payment.id ||
+    !payment.order_id
+  ) {
+    console.warn("Ignoring malformed payment.authorized webhook.");
+    return;
   }
+
+  const order = await Order.findOne({
+    razorpay_order_id: payment.order_id,
+  });
+
+  if (!order) {
+    console.warn("Authorized payment has no matching local order.");
+    return;
+  }
+
+  if (order.inventory_status === "Released") {
+    console.warn("Ignoring authorization for a released reservation.");
+    return;
+  }
+
+  await captureAuthorizedPayment({
+    orderId: order._id,
+    razorpayPaymentId: payment.id,
+    razorpayOrderId: payment.order_id,
+    amountPaise: Number(payment.amount),
+    currency: payment.currency || "INR",
+    paymentMethod: payment.method || "digital",
+  });
 }
 
-async function handlePaymentCaptured(payment, eventId) {
+/**
+ * Handle successful captured payment.
+ */
+async function handlePaymentCaptured(event) {
+  const payment = event?.payload?.payment?.entity;
+
+  if (!payment) {
+    console.warn("payment.captured webhook without payment entity.");
+    return;
+  }
+
   const razorpayPaymentId = payment.id;
   const razorpayOrderId = payment.order_id;
 
   if (!razorpayPaymentId || !razorpayOrderId) {
-    console.warn("Captured payment missing IDs");
+    console.warn("Captured payment is missing required IDs.");
     return;
   }
+
+  if (payment.status !== "captured") {
+    console.warn(
+      `Ignoring payment.captured event with unexpected status: ${payment.status}`,
+    );
+    return;
+  }
+
+  // ----------------------------------------
+  // Find local order
+  // ----------------------------------------
 
   const order = await Order.findOne({
     razorpay_order_id: razorpayOrderId,
@@ -152,109 +220,58 @@ async function handlePaymentCaptured(payment, eventId) {
 
   if (!order) {
     console.warn(
-      `Order not found for Razorpay order ${razorpayOrderId}`
+      `Order not found for Razorpay order ${razorpayOrderId}`,
     );
     return;
   }
 
-  // Idempotent payment record.
-  await Payment.findOneAndUpdate(
-    { razorpay_payment_id: razorpayPaymentId },
-    {
-      order_id: order._id,
-      razorpay_payment_id: razorpayPaymentId,
-      amount: payment.amount / 100,
-      status: payment.status || "captured",
-      method: payment.method,
-      error_description: payment.error_description,
-    },
-    {
-      upsert: true,
-      new: true,
-      setDefaultsOnInsert: true,
-    }
+  if (order.inventory_status === "Released") {
+    console.error(
+      `Captured payment rejected for released order ${order._id}.`,
+    );
+    return;
+  }
+
+  // ----------------------------------------
+  // Finalize through the shared service
+  // ----------------------------------------
+
+  const result = await finalizeSuccessfulPayment({
+    orderId: order._id,
+    razorpayPaymentId,
+    razorpayOrderId,
+    amountPaise: Number(payment.amount),
+    currency: payment.currency || "INR",
+    paymentStatus: payment.status,
+    paymentMethod: payment.method || "digital",
+  });
+
+  if (result?.alreadyFinalized) {
+    console.log(`Payment already finalized for order ${order._id}`);
+    return;
+  }
+
+  console.log(
+    `Order ${order._id} finalized as PAID via Razorpay webhook`,
   );
-
-  // Never downgrade an already paid order.
-  if (order.payment_status !== "Paid") {
-    order.payment_status = "Paid";
-    order.status = "Confirmed";
-    order.razorpay_payment_id = razorpayPaymentId;
-
-    await order.save();
-
-    console.log(
-      `Order ${order._id} marked PAID via Razorpay webhook`
-    );
-  }
 }
 
-async function handleOrderPaid(
-  payment,
-  razorpayOrder,
-  eventId
-) {
-  const razorpayOrderId = razorpayOrder?.id;
+/**
+ * Handle failed Razorpay payment.
+ */
+async function handlePaymentFailed(event) {
+  const payment = event?.payload?.payment?.entity;
 
-  if (!razorpayOrderId) {
-    console.warn("order.paid missing Razorpay order ID");
+  if (!payment) {
+    console.warn("payment.failed webhook without payment entity.");
     return;
   }
 
-  const order = await Order.findOne({
-    razorpay_order_id: razorpayOrderId,
-  });
-
-  if (!order) {
-    console.warn(
-      `Order not found for Razorpay order ${razorpayOrderId}`
-    );
-    return;
-  }
-
-  const paymentId = payment?.id;
-
-  if (paymentId) {
-    await Payment.findOneAndUpdate(
-      { razorpay_payment_id: paymentId },
-      {
-        order_id: order._id,
-        razorpay_payment_id: paymentId,
-        amount: payment.amount
-          ? payment.amount / 100
-          : order.total_amount,
-        status: payment.status || "captured",
-        method: payment.method,
-        error_description: payment.error_description,
-      },
-      {
-        upsert: true,
-        new: true,
-        setDefaultsOnInsert: true,
-      }
-    );
-
-    order.razorpay_payment_id = paymentId;
-  }
-
-  if (order.payment_status !== "Paid") {
-    order.payment_status = "Paid";
-    order.status = "Confirmed";
-
-    await order.save();
-
-    console.log(
-      `Order ${order._id} marked PAID via order.paid webhook`
-    );
-  }
-}
-
-async function handlePaymentFailed(payment, eventId) {
   const razorpayPaymentId = payment.id;
   const razorpayOrderId = payment.order_id;
 
   if (!razorpayPaymentId || !razorpayOrderId) {
-    console.warn("Failed payment missing IDs");
+    console.warn("Failed payment is missing required IDs.");
     return;
   }
 
@@ -264,42 +281,30 @@ async function handlePaymentFailed(payment, eventId) {
 
   if (!order) {
     console.warn(
-      `Order not found for failed Razorpay order ${razorpayOrderId}`
+      `Order not found for failed Razorpay order ${razorpayOrderId}`,
     );
     return;
   }
 
-  await Payment.findOneAndUpdate(
-    { razorpay_payment_id: razorpayPaymentId },
-    {
-      order_id: order._id,
-      razorpay_payment_id: razorpayPaymentId,
-      amount: payment.amount
-        ? payment.amount / 100
-        : order.total_amount,
-      status: "failed",
-      method: payment.method,
-      error_description: payment.error_description,
-    },
-    {
-      upsert: true,
-      new: true,
-      setDefaultsOnInsert: true,
-    }
-  );
+  const result = await markPaymentFailed({
+    orderId: order._id,
+    razorpayPaymentId,
+    razorpayOrderId,
+    amountPaise: Number(payment.amount),
+    paymentMethod: payment.method || "digital",
+    errorDescription: payment.error_description || null,
+  });
 
-  /*
-   * Do not turn an already-paid order into Failed.
-   */
-  if (order.payment_status !== "Paid") {
-    order.payment_status = "Failed";
-
-    await order.save();
-
+  if (result?.alreadyPaid) {
     console.log(
-      `Order ${order._id} marked PAYMENT FAILED`
+      `Ignoring failed webhook because order ${order._id} is already PAID`,
     );
+    return;
   }
+
+  console.log(
+    `Order ${order._id} marked PAYMENT FAILED via Razorpay webhook`,
+  );
 }
 
 export default router;

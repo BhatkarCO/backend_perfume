@@ -25,11 +25,11 @@ if (isEmailConfigured) {
       },
     });
     console.log('Nodemailer SMTP client initialized.');
-  } catch (err) {
-    console.error('Error creating email transporter:', err);
+  } catch {
+    console.error('Error creating email transporter.');
   }
 } else {
-  console.log('SMTP credentials not configured. Emails will be logged to the server console.');
+  console.log('SMTP credentials not configured. Email simulation is enabled.');
 }
 
 /**
@@ -53,8 +53,8 @@ export const sendEmail = async ({ to, subject, text, html }) => {
         html,
       });
       return true;
-    } catch (err) {
-      console.error('Nodemailer failed to send email:', err);
+    } catch {
+      console.error('Nodemailer email delivery failed.');
       // fallback to console log
     }
   }
@@ -63,13 +63,19 @@ export const sendEmail = async ({ to, subject, text, html }) => {
   // Developer console fallback
   console.log('\n==================================================');
   console.log(`[EMAIL SEND SIMULATION]`);
-  console.log(`From: ${from}`);
-  console.log(`To: ${to}`);
-  console.log(`Subject: ${subject}`);
-  console.log(`Text Message: ${text}`);
+  console.log('Email delivery unavailable.');
+  console.log('Email content omitted.');
   console.log('==================================================\n');
   return true;
 };
+
+export const escapeHtml = (value) =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 
 /**
  * Sends a contact form submission email via Resend
@@ -88,29 +94,33 @@ export const sendContactEmail = async (user) => {
     console.log(`[RESEND SIMULATION]`);
     console.log(`From: Website Contact <support@bhatkarco.com>`);
     console.log(`To: support@bhatkarco.com`);
-    console.log(`Reply-To: ${user.email}`);
-    console.log(`Subject: Contact Form: ${user.name}`);
-    console.log(`Message: ${user.message}`);
+    console.log('Contact form message received; content omitted.');
     console.log('==================================================\n');
     return true;
   }
 
   try {
+    const name = escapeHtml(user.name);
+    const email = escapeHtml(user.email);
+    const subject = escapeHtml(user.subject || "");
+    const message = escapeHtml(user.message).replace(/\r?\n/g, "<br>");
+
     await resend.emails.send({
       from: "Website Contact <support@bhatkarco.com>",
       to: "support@bhatkarco.com",
       replyTo: user.email,
-      subject: `Contact Form: ${user.name}`,
+      subject: "Contact form submission",
       html: `
-        <p><strong>Name:</strong> ${user.name}</p>
-        <p><strong>Email:</strong> ${user.email}</p>
+        <p><strong>Name:</strong> ${name}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Subject:</strong> ${subject}</p>
         <p><strong>Message:</strong></p>
-        <p>${user.message}</p>
+        <p>${message}</p>
       `,
     });
     return true;
-  } catch (error) {
-    console.error("Resend contact email delivery failed:", error);
+  } catch {
+    console.error("Resend contact email delivery failed.");
     return false;
   }
 };

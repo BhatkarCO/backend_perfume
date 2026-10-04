@@ -19,12 +19,61 @@ import ContactMessage from './ContactMessage.js';
 
 dotenv.config();
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/bhatkarbase';
+const runtimeEnvironment = process.env.NODE_ENV;
+const SEED_MONGODB_URI = process.env.SEED_MONGODB_URI;
+const SEED_CONFIRMATION = "I_UNDERSTAND_THIS_DELETES_DATA";
 
 const seedDatabase = async () => {
+  if (runtimeEnvironment === "production") {
+    throw new Error("Seed refused when NODE_ENV is production.");
+  }
+
+  if (!["development", "test"].includes(runtimeEnvironment)) {
+    throw new Error("Seed requires NODE_ENV=development or NODE_ENV=test.");
+  }
+
+  if (process.env.SEED_CONFIRMATION !== SEED_CONFIRMATION) {
+    throw new Error("Seed requires explicit SEED_CONFIRMATION.");
+  }
+
+  if (!SEED_MONGODB_URI) {
+    throw new Error("SEED_MONGODB_URI is required for seeding.");
+  }
+
+  if (
+    process.env.MONGODB_URI &&
+    SEED_MONGODB_URI === process.env.MONGODB_URI
+  ) {
+    throw new Error("Seed URI must not match the application database URI.");
+  }
+
+  const databaseUrl = new URL(SEED_MONGODB_URI);
+  const databaseName = databaseUrl.pathname.replace(/^\/+/, "");
+  if (
+    /(^|[-_.])(prod|production)([-_.]|$)/i.test(databaseName) ||
+    /(^|[-_.])(prod|production)([-_.]|$)/i.test(databaseUrl.hostname)
+  ) {
+    throw new Error("Seed refused for a production-named database.");
+  }
+
+  const seedAdminEmail = process.env.SEED_ADMIN_EMAIL;
+  const seedAdminPassword = process.env.SEED_ADMIN_PASSWORD;
+  const seedUserEmail = process.env.SEED_USER_EMAIL;
+  const seedUserPassword = process.env.SEED_USER_PASSWORD;
+  if (
+    !seedAdminEmail ||
+    !seedAdminPassword ||
+    !seedUserEmail ||
+    !seedUserPassword
+  ) {
+    throw new Error(
+      "Seed requires SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD, SEED_USER_EMAIL, and SEED_USER_PASSWORD.",
+    );
+  }
+
   console.log('Connecting to MongoDB for seeding...');
   try {
-    await mongoose.connect(MONGODB_URI);
+    await mongoose.connect(SEED_MONGODB_URI);
     console.log('MongoDB Connected.');
 
     // 0. Drop existing collections to ensure clean seed
@@ -45,11 +94,11 @@ const seedDatabase = async () => {
 
     // 1. Seed Users
     console.log('Seeding users...');
-    const adminPasswordHash = await bcrypt.hash('AdminPass123', 10);
-    const userPasswordHash = await bcrypt.hash('UserPass123', 10);
+    const adminPasswordHash = await bcrypt.hash(seedAdminPassword, 10);
+    const userPasswordHash = await bcrypt.hash(seedUserPassword, 10);
 
     const adminUser = new User({
-      email: 'admin@bhatkar-perfumes.com',
+      email: seedAdminEmail,
       password_hash: adminPasswordHash,
       role: 'admin',
       name: 'Bhatkar & Co. Admin',
@@ -59,7 +108,7 @@ const seedDatabase = async () => {
     await adminUser.save();
 
     const regularUser = new User({
-      email: 'user@bhatkar-perfumes.com',
+      email: seedUserEmail,
       password_hash: userPasswordHash,
       role: 'user',
       name: 'Rohan Bhatkar',
@@ -310,12 +359,14 @@ const seedDatabase = async () => {
 
     console.log('Database seeding completed successfully!');
   } catch (error) {
-    console.error('Error seeding database:', error);
-    process.exit(1);
+    console.error("Seeding failed.");
+    throw new Error("Seeding failed.");
   } finally {
     await mongoose.disconnect();
-    process.exit(0);
   }
 };
 
-seedDatabase();
+seedDatabase().catch((error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});

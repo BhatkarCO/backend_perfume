@@ -1,13 +1,18 @@
+import mongoose from "mongoose";
 import Review from "../models/Review.js";
 import Product from "../models/Product.js";
 import Order from "../models/Order.js";
 import User from "../models/User.js";
 import Coupon from "../models/Coupon.js";
 import bcrypt from "bcryptjs";
+import OTP from "../models/OTP.js";
+import { generateOTP } from "../utils/otp.js";
 import InventoryLog from "../models/InventoryLog.js";
 import { uploadAsset } from "../config/cloudinary.js";
 import { sendEmail } from "../utils/email.js";
 import { sendOTPEmail } from "../utils/resendEmail.js";
+
+import { isSafeProductImage } from "../middleware/upload.js";
 
 // --- PRODUCT MANAGEMENT ---
 
@@ -29,11 +34,21 @@ export const addProduct = async (req, res) => {
     is_new_arrival,
     fragrance_notes, // JSON string
   } = req.body;
+  const initialStock =
+    stock_quantity === undefined || stock_quantity === ""
+      ? 0
+      : Number(stock_quantity);
 
   if (!name || !description || !price || !gender) {
     return res
       .status(400)
       .json({ message: "Name, description, price, and gender are required." });
+  }
+
+  if (!Number.isInteger(initialStock) || initialStock < 0) {
+    return res.status(400).json({
+      message: "Stock quantity must be a non-negative integer.",
+    });
   }
 
   if (sale_price && parseFloat(sale_price) > parseFloat(price)) {
@@ -68,6 +83,13 @@ export const addProduct = async (req, res) => {
     if (req.files && req.files.length > 0) {
       for (let i = 0; i < req.files.length; i++) {
         const file = req.files[i];
+
+        if (!(await isSafeProductImage(file.buffer))) {
+          return res.status(400).json({
+            message: "Invalid image content.",
+          });
+        }
+
         const uploadedImage = await uploadAsset(
           file.buffer,
           file.originalname,
@@ -89,7 +111,7 @@ export const addProduct = async (req, res) => {
       short_description: short_description || null,
       price: parseFloat(price),
       sale_price: sale_price ? parseFloat(sale_price) : null,
-      stock_quantity: parseInt(stock_quantity || "0"),
+      stock_quantity: initialStock,
       category_id: category_id || null,
       gender: dbGender,
       is_featured: is_featured === "true" || is_featured === true,
@@ -146,6 +168,17 @@ export const editProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found." });
     }
 
+    const requestedStock =
+      stock_quantity === undefined ? undefined : Number(stock_quantity);
+    if (
+      requestedStock !== undefined &&
+      (!Number.isInteger(requestedStock) || requestedStock < 0)
+    ) {
+      return res.status(400).json({
+        message: "Stock quantity must be a non-negative integer.",
+      });
+    }
+
     const finalPrice = price ? parseFloat(price) : product.price;
     const finalSalePrice =
       sale_price !== undefined
@@ -189,8 +222,7 @@ export const editProduct = async (req, res) => {
     if (price) product.price = parseFloat(price);
     if (sale_price !== undefined)
       product.sale_price = sale_price ? parseFloat(sale_price) : null;
-    if (stock_quantity !== undefined)
-      product.stock_quantity = parseInt(stock_quantity);
+    if (requestedStock !== undefined) product.stock_quantity = requestedStock;
     if (category_id !== undefined) product.category_id = category_id || null;
     if (gender)
       product.gender =
@@ -212,11 +244,8 @@ export const editProduct = async (req, res) => {
     }
 
     // Log stock change if stock_quantity was updated
-    if (
-      stock_quantity !== undefined &&
-      parseInt(stock_quantity) !== previousStock
-    ) {
-      const difference = parseInt(stock_quantity) - previousStock;
+    if (stock_quantity !== undefined && requestedStock !== previousStock) {
+      const difference = requestedStock - previousStock;
       const log = new InventoryLog({
         product_id: id,
         change_amount: difference,
@@ -242,6 +271,13 @@ export const editProduct = async (req, res) => {
       const hasPrimary = product.images.some((img) => img.is_primary);
       for (let i = 0; i < req.files.length; i++) {
         const file = req.files[i];
+
+        if (!(await isSafeProductImage(file.buffer))) {
+          return res.status(400).json({
+            message: "Invalid image content.",
+          });
+        }
+
         const uploadedImage = await uploadAsset(
           file.buffer,
           file.originalname,
@@ -271,7 +307,40 @@ export const deleteProduct = async (req, res) => {
   const { id } = req.params;
 
   try {
-    const deletedProduct = await Product.findByIdAndDelete(id);
+    const session = await mongoose.startSession();
+    let deletedProduct = null;
+    let hasReservation = false;
+    try {
+      await session.withTransaction(async () => {
+        hasReservation = Boolean(
+          await Order.findOne({
+            items: { $elemMatch: { product_id: id } },
+            inventory_status: "Reserved",
+          })
+            .select("_id")
+            .session(session),
+        );
+
+        if (hasReservation) {
+          return;
+        }
+
+        const product = await Product.findById(id).session(session);
+        if (product) {
+          await product.deleteOne({ session });
+          deletedProduct = product;
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (hasReservation) {
+      return res.status(409).json({
+        message: "Product has orders with reserved inventory.",
+      });
+    }
+
     if (!deletedProduct) {
       return res.status(404).json({ message: "Product not found." });
     }
@@ -421,18 +490,13 @@ export const getAdminOrderById = async (req, res) => {
     orderObj.customer_phone = order.user_id?.phone || "";
 
     // Shipping address
-    orderObj.address_line1 =
-      order.shipping_address_id?.address_line1 || "";
-    orderObj.address_line2 =
-      order.shipping_address_id?.address_line2 || "";
+    orderObj.address_line1 = order.shipping_address_id?.address_line1 || "";
+    orderObj.address_line2 = order.shipping_address_id?.address_line2 || "";
     orderObj.city = order.shipping_address_id?.city || "";
     orderObj.state = order.shipping_address_id?.state || "";
-    orderObj.postal_code =
-      order.shipping_address_id?.postal_code || "";
-    orderObj.shipping_phone =
-      order.shipping_address_id?.phone || "";
-    orderObj.country =
-      order.shipping_address_id?.country || "India";
+    orderObj.postal_code = order.shipping_address_id?.postal_code || "";
+    orderObj.shipping_phone = order.shipping_address_id?.phone || "";
+    orderObj.country = order.shipping_address_id?.country || "India";
 
     // Order items
     orderObj.items = order.items.map((item) => {
@@ -486,15 +550,143 @@ export const updateOrderStatus = async (req, res) => {
   }
 
   try {
-    const order = await Order.findById(orderId);
+    let order;
+    if (status === "Cancelled") {
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(async () => {
+          const existingOrder = await Order.findById(orderId).session(session);
+          if (
+            !existingOrder ||
+            existingOrder.payment_status === "Paid" ||
+            existingOrder.status === "Cancelled"
+          ) {
+            order = existingOrder;
+            return;
+          }
 
-    if (!order) {
-      return res.status(404).json({ message: "Order not found." });
+          order = await Order.findOneAndUpdate(
+            {
+              _id: orderId,
+              status: { $ne: "Cancelled" },
+              payment_status: { $ne: "Paid" },
+            },
+            {
+              $set: {
+                status,
+                updated_at: new Date(),
+              },
+            },
+            { returnDocument: "after", session },
+          );
+
+          if (
+            !order ||
+            existingOrder.payment_method !== "COD" ||
+            existingOrder.inventory_status !== "Reserved"
+          ) {
+            return;
+          }
+
+          const quantitiesByProduct = new Map();
+          for (const item of existingOrder.items) {
+            const productId = item.product_id.toString();
+            quantitiesByProduct.set(
+              productId,
+              (quantitiesByProduct.get(productId) || 0) + Number(item.quantity),
+            );
+          }
+
+          for (const [productId, quantity] of quantitiesByProduct) {
+            const stockUpdate = await Product.updateOne(
+              { _id: productId },
+              { $inc: { stock_quantity: quantity } },
+              { session },
+            );
+
+            if (stockUpdate.matchedCount !== 1) {
+              throw new Error("Unable to release reserved inventory.");
+            }
+
+            await InventoryLog.create(
+              [
+                {
+                  product_id: productId,
+                  change_amount: quantity,
+                  reason: `Reservation released - Order #${orderId}`,
+                },
+              ],
+              { session },
+            );
+          }
+
+          order.inventory_status = "Released";
+          await order.save({ session });
+        });
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      order = await Order.findOneAndUpdate(
+        {
+          _id: orderId,
+          inventory_status: { $ne: "Released" },
+          status: { $ne: "Cancelled" },
+        },
+        {
+          $set: {
+            status,
+            updated_at: new Date(),
+          },
+        },
+        { returnDocument: "after" },
+      );
+
+      if (!order) {
+        const existingOrder = await Order.findById(orderId).select(
+          "inventory_status status",
+        );
+
+        if (!existingOrder) {
+          return res.status(404).json({ message: "Order not found." });
+        }
+
+        if (existingOrder.inventory_status === "Released") {
+          return res.status(409).json({
+            message:
+              "This order has already released its inventory and cannot be reopened.",
+          });
+        }
+
+        if (existingOrder.status === "Cancelled") {
+          return res.status(409).json({
+            message:
+              "This order has already been cancelled and cannot be reopened.",
+          });
+        }
+
+        return res.status(409).json({
+          message: "Order status changed before the update could be applied.",
+        });
+      }
     }
 
-    order.status = status;
-    order.updated_at = new Date();
-    await order.save();
+    if (status === "Cancelled" && order?.payment_status === "Paid") {
+      return res.status(409).json({
+        message: "A paid order cannot be cancelled.",
+      });
+    }
+
+    if (!order) {
+      const existingOrder =
+        await Order.findById(orderId).select("payment_status");
+      if (existingOrder?.payment_status === "Paid") {
+        return res.status(409).json({
+          message: "A paid order cannot be cancelled.",
+        });
+      }
+      return res.status(404).json({ message: "Order not found." });
+    }
 
     // Get customer details
     const customer = await User.findById(order.user_id);
@@ -854,81 +1046,210 @@ export const getAdminReports = async (req, res) => {
 
 export const forgotAdminPassword = async (req, res) => {
   try {
-    const { email } = req.body;
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
+
+    const genericResponse = {
+      message:
+        "If an admin account exists for this email, an OTP has been sent.",
+    };
+
+    if (!email) {
+      return res.status(200).json(genericResponse);
+    }
 
     const admin = await User.findOne({
-      email: email.toLowerCase(),
+      email,
       role: "admin",
     });
 
     if (!admin) {
-      return res.status(404).json({
-        message: "Admin account not found.",
+      return res.status(200).json(genericResponse);
+    }
+
+    const existingOTP = await OTP.findOne({
+      email,
+      purpose: "admin-forgot-password",
+    });
+
+    if (existingOTP) {
+      const elapsed = Date.now() - new Date(existingOTP.lastSentAt).getTime();
+
+      if (elapsed < 60000) {
+        return res.status(200).json(genericResponse);
+      }
+    }
+
+    const otp = generateOTP();
+    const hashedOTP = await bcrypt.hash(otp, 10);
+
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    if (existingOTP) {
+      existingOTP.otp = hashedOTP;
+      existingOTP.expiresAt = expiresAt;
+      existingOTP.attempts = 0;
+      existingOTP.lastSentAt = new Date();
+      existingOTP.verified = false;
+
+      await existingOTP.save();
+    } else {
+      await OTP.create({
+        email,
+        otp: hashedOTP,
+        purpose: "admin-forgot-password",
+        expiresAt,
+        lastSentAt: new Date(),
       });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    await sendOTPEmail(email, otp);
 
-    admin.otp_code = otp;
-    admin.otp_expires_at = new Date(Date.now() + 10 * 60 * 1000);
-
-    await admin.save();
-
-    await sendOTPEmail(admin.email, otp);
-
-    res.json({
-      message:
-        "If an admin account exists for this email, an OTP has been sent.",
-    });
+    return res.status(200).json(genericResponse);
   } catch (error) {
-    console.error(error);
+    console.error("Admin forgot password error:", error);
 
-    res.status(500).json({
-      message: "Server Error",
+    return res.status(500).json({
+      message: "Unable to process password reset request.",
     });
   }
 };
 
 export const resetAdminPassword = async (req, res) => {
   try {
-    const { email, otp, newPassword } = req.body;
+    const email = String(req.body.email || "")
+      .trim()
+      .toLowerCase();
+    const otp = String(req.body.otp || "").trim();
+    const newPassword = req.body.newPassword;
 
-    const admin = await User.findOne({
-      email: email.toLowerCase(),
-      role: "admin",
-    });
-
-    if (!admin) {
-      return res.status(404).json({
-        message: "Admin not found.",
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        message: "Email, OTP, and new password are required.",
       });
     }
 
-    if (
-      admin.otp_code !== otp ||
-      !admin.otp_expires_at ||
-      admin.otp_expires_at < new Date()
-    ) {
+    const now = new Date();
+    const otpRecord = await OTP.findOneAndUpdate(
+      {
+        email,
+        purpose: "admin-forgot-password",
+        expiresAt: { $gt: now },
+        attempts: { $lt: 5 },
+      },
+      { $inc: { attempts: 1 } },
+      { returnDocument: "after" },
+    );
+
+    if (!otpRecord) {
       return res.status(400).json({
         message: "Invalid or expired OTP.",
       });
     }
 
-    admin.password_hash = await bcrypt.hash(newPassword, 10);
+    const attemptWindowMs = 15 * 60 * 1000;
+    const attemptWindowStart = new Date(now.getTime() - attemptWindowMs);
+    const attemptState = await User.findOneAndUpdate(
+      {
+        email,
+        role: "admin",
+        $or: [
+          { admin_reset_attempts: { $lt: 5 } },
+          { admin_reset_attempts_reset_at: { $lte: attemptWindowStart } },
+          { admin_reset_attempts_reset_at: { $exists: false } },
+        ],
+      },
+      [
+        {
+          $set: {
+            admin_reset_attempts: {
+              $cond: [
+                {
+                  $lte: [
+                    {
+                      $ifNull: ["$admin_reset_attempts_reset_at", new Date(0)],
+                    },
+                    attemptWindowStart,
+                  ],
+                },
+                1,
+                { $add: [{ $ifNull: ["$admin_reset_attempts", 0] }, 1] },
+              ],
+            },
+            admin_reset_attempts_reset_at: {
+              $cond: [
+                {
+                  $lte: [
+                    {
+                      $ifNull: ["$admin_reset_attempts_reset_at", new Date(0)],
+                    },
+                    attemptWindowStart,
+                  ],
+                },
+                now,
+                "$admin_reset_attempts_reset_at",
+              ],
+            },
+          },
+        },
+      ],
+      {
+        returnDocument: "after",
+        projection: { _id: 1, admin_reset_attempts: 1 },
+      },
+    );
 
-    admin.otp_code = undefined;
-    admin.otp_expires_at = undefined;
+    if (!attemptState) {
+      return res.status(400).json({
+        message: "Invalid or expired OTP.",
+      });
+    }
 
-    await admin.save();
+    const otpMatches = await bcrypt.compare(otp, otpRecord.otp);
 
-    res.json({
+    if (!otpMatches) {
+      return res.status(400).json({
+        message: "Invalid or expired OTP.",
+      });
+    }
+
+    const consumedOTP = await OTP.findOneAndDelete({
+      _id: otpRecord._id,
+      email,
+      purpose: "admin-forgot-password",
+      otp: otpRecord.otp,
+      expiresAt: { $gt: new Date() },
+    });
+    if (!consumedOTP) {
+      return res.status(400).json({
+        message: "Invalid or expired OTP.",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    const updatedAdmin = await User.findOneAndUpdate(
+      { _id: attemptState._id, role: "admin" },
+      {
+        $set: { password_hash: passwordHash },
+        $inc: { session_version: 1 },
+      },
+      { returnDocument: "after" },
+    );
+    if (!updatedAdmin) {
+      return res.status(400).json({
+        message: "Invalid password reset request.",
+      });
+    }
+
+    return res.status(200).json({
       message: "Password reset successfully.",
     });
   } catch (error) {
-    console.error(error);
+    console.error("Admin reset password error:", error);
 
-    res.status(500).json({
-      message: "Server Error",
+    return res.status(500).json({
+      message: "Unable to reset password.",
     });
   }
 };
@@ -1049,9 +1370,7 @@ export const createCoupon = async (req, res) => {
  */
 export const getAdminCoupons = async (req, res) => {
   try {
-    const coupons = await Coupon.find()
-      .sort({ created_at: -1 })
-      .lean();
+    const coupons = await Coupon.find().sort({ created_at: -1 }).lean();
 
     const formattedCoupons = coupons.map((coupon) => ({
       ...coupon,

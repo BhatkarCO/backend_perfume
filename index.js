@@ -14,6 +14,9 @@ import categoryRoutes from "./routes/categoryRoutes.js";
 import wishlistRoutes from "./routes/wishlistRoutes.js";
 import shiprocketWebhookRoutes from "./routes/shiprocketWebhookRoutes.js";
 import razorpayWebhookRoutes from "./routes/razorpayWebhookRoutes.js";
+
+import { requireCsrf } from "./middleware/csrf.js";
+
 import orderRoutes from "./routes/orderRoutes.js";
 import couponRoutes from "./routes/couponRoutes.js";
 import addressRoutes from "./routes/addressRoutes.js";
@@ -24,6 +27,11 @@ import contactRoutes from "./routes/contactRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
 import cookieParser from "cookie-parser";
 import instagramRoutes from "./routes/instagramRoutes.js";
+import { chatLimiter } from "./middleware/authRateLimiters.js";
+import {
+  isManualCapturePolicyEnabled,
+} from "./config/razorpay.js";
+import { reconcileExpiredPrepaidReservations } from "./services/paymentService.js";
 
 dotenv.config();
 
@@ -57,7 +65,7 @@ const corsOptions = {
   origin: (origin, callback) => {
     // Allow requests with no Origin (Postman, server-to-server)
     if (!origin) {
-      return callback(null, true);
+      return callback(null, false);
     }
 
     // Allow only whitelisted origins
@@ -70,20 +78,49 @@ const corsOptions = {
 
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"],
 };
 
 app.use(cors(corsOptions));
 
 // Use cookie parser middleware
 app.use(cookieParser());
+
+const webhookLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: "Too many webhook requests.",
+  },
+});
+
+//webhooks
+app.use("/api/webhooks/razorpay", webhookLimiter, razorpayWebhookRoutes);
+app.use("/api/webhooks/shiprocket", webhookLimiter, shiprocketWebhookRoutes);
+
+// Chat has a smaller route-specific body limit than the global API parser.
+app.use(
+  "/api/chat",
+  chatLimiter,
+  express.json({ limit: "8kb" }),
+  (error, req, res, next) => {
+    if (error?.type === "entity.too.large") {
+      return res.status(413).json({ message: "Chat request is too large." });
+    }
+    if (error?.type === "entity.parse.failed") {
+      return res.status(400).json({ message: "Invalid chat request." });
+    }
+    return next(error);
+  },
+  requireCsrf,
+  chatRoutes,
+);
+
 // JSON Request Parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-//webhooks
-app.use("/api/webhooks/razorpay", razorpayWebhookRoutes);
-app.use("/api/webhooks/shiprocket", shiprocketWebhookRoutes);
 
 // Serve static upload fallback directory & public assets
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads")));
@@ -102,6 +139,7 @@ const apiLimiter = rateLimit({
 });
 
 app.use("/api", apiLimiter);
+app.use("/api", requireCsrf);
 
 // API Routing Mapping
 app.use("/api/auth", authRoutes);
@@ -109,7 +147,6 @@ app.use("/api/products", productRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 
-app.use("/api/webhooks/shipping", shiprocketWebhookRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/coupons", couponRoutes);
 app.use("/api/addresses", addressRoutes);
@@ -118,7 +155,6 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/shiprocket", shiprocketRoutes);
 app.use("/api/instagram", instagramRoutes);
 app.use("/api/general", contactRoutes);
-app.use("/api/chat", chatRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -152,4 +188,29 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Bhatkar Perfumes backend server listening on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
+
+  if (isManualCapturePolicyEnabled()) {
+    let reconciliationRunning = false;
+    setInterval(async () => {
+      if (reconciliationRunning) {
+        return;
+      }
+
+      reconciliationRunning = true;
+      try {
+        await reconcileExpiredPrepaidReservations();
+      } catch (error) {
+        console.error(
+          "Prepaid reservation reconciliation failed:",
+          error.message,
+        );
+      } finally {
+        reconciliationRunning = false;
+      }
+    }, 5 * 60 * 1000).unref();
+  } else {
+    console.warn(
+      "Prepaid reservation expiry is disabled; verify manual capture with a 72-hour timeout and Direct Settlement disabled, then set the corresponding Razorpay policy environment values.",
+    );
+  }
 });

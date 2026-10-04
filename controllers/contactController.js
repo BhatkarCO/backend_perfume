@@ -64,7 +64,7 @@ export const submitContactForm = async (req, res) => {
     await contactMessage.save();
 
     // Send alert email to admin via Resend
-    await sendContactEmail({ name, email, message });
+    await sendContactEmail({ name, email, subject, message });
 
 
     res
@@ -73,7 +73,7 @@ export const submitContactForm = async (req, res) => {
         message: "Message sent successfully! We will get back to you shortly.",
       });
   } catch (error) {
-    console.error("Contact form submission error:", error);
+    console.error("Contact form submission failed.");
     res.status(500).json({ message: "Internal server error." });
   }
 };

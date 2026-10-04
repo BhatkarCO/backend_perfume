@@ -1,6 +1,12 @@
 import axios from "axios";
 
 const SHIPROCKET_BASE_URL = "https://apiv2.shiprocket.in/v1/external";
+const SHIPROCKET_INVOICE_HOSTS = new Set([
+  "apiv2.shiprocket.in",
+  "kr-shiprocket.s3.amazonaws.com",
+  "sr-core-cdn.shiprocket.in",
+]);
+const MAX_INVOICE_BYTES = 10 * 1024 * 1024;
 
 let shiprocketToken = null;
 let tokenExpiry = null;
@@ -19,13 +25,9 @@ export const getShiprocketToken = async () => {
     shiprocketToken = data.token;
     tokenExpiry = new Date(Date.now() + 239 * 60 * 60 * 1000);
 
-    console.log("✅ Shiprocket authenticated successfully");
     return shiprocketToken;
   } catch (error) {
-    console.error(
-      "❌ Shiprocket Login Failed:",
-      error.response?.data || error.message,
-    );
+    console.error("Shiprocket authentication failed.");
     throw error;
   }
 };
@@ -102,6 +104,53 @@ export const generateShiprocketInvoice = async (shiprocketOrderId) => {
   );
 
   return data;
+};
+
+export const downloadShiprocketInvoice = async (invoiceUrl) => {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(invoiceUrl);
+  } catch {
+    throw new Error("Invalid Shiprocket invoice URL.");
+  }
+
+  if (
+    parsedUrl.protocol !== "https:" ||
+    !SHIPROCKET_INVOICE_HOSTS.has(parsedUrl.hostname.toLowerCase()) ||
+    parsedUrl.username ||
+    parsedUrl.password ||
+    (parsedUrl.port && parsedUrl.port !== "443")
+  ) {
+    throw new Error("Untrusted Shiprocket invoice URL.");
+  }
+
+  const response = await axios.get(parsedUrl.href, {
+    responseType: "arraybuffer",
+    timeout: 10000,
+    maxRedirects: 0,
+    maxContentLength: MAX_INVOICE_BYTES,
+    maxBodyLength: MAX_INVOICE_BYTES,
+    headers: { Accept: "application/pdf" },
+  });
+
+  const contentType = String(response.headers?.["content-type"] || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  const pdfBuffer = Buffer.from(response.data);
+
+  if (
+    !["application/pdf", "application/octet-stream", "text/pdf"].includes(
+      contentType,
+    ) ||
+    pdfBuffer.length === 0 ||
+    pdfBuffer.length > MAX_INVOICE_BYTES ||
+    pdfBuffer.subarray(0, 5).toString("ascii") !== "%PDF-"
+  ) {
+    throw new Error("Invalid Shiprocket invoice response.");
+  }
+
+  return pdfBuffer;
 };
 
 export const assignShiprocketAwb = async ({ shipment_id, courier_id }) => {

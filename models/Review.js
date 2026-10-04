@@ -12,7 +12,13 @@ const reviewSchema = new mongoose.Schema({
 
 // Indexes for fast lookup of product/user reviews
 reviewSchema.index({ product_id: 1 });
-reviewSchema.index({ user_id: 1 });
+reviewSchema.index(
+  { product_id: 1, user_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { user_id: { $type: "objectId" } },
+  },
+);
 
 // Map _id to id
 reviewSchema.virtual('id').get(function() {

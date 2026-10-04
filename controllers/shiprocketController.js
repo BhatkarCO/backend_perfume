@@ -6,18 +6,16 @@ import {
 
 export const testShiprocket = async (req, res) => {
   try {
-    const token = await getShiprocketToken();
+    await getShiprocketToken();
 
     return res.status(200).json({
       success: true,
       message: "Shiprocket authenticated successfully.",
-      token,
     });
-  } catch (err) {
+  } catch {
     return res.status(500).json({
       success: false,
       message: "Shiprocket authentication failed.",
-      error: err.response?.data || err.message,
     });
   }
 };
@@ -45,10 +43,7 @@ export const getServiceability = async (req, res) => {
       data: response,
     });
   } catch (error) {
-    console.error(
-      "Shiprocket Serviceability:",
-      error.response?.data || error.message
-    );
+    console.error("Shiprocket serviceability request failed.");
 
     return res.status(500).json({
       success: false,

@@ -1,25 +1,93 @@
 import { Resend } from "resend";
-import { generateShiprocketInvoice } from "../config/shiprocket.js";
+import {
+  downloadShiprocketInvoice,
+  generateShiprocketInvoice,
+} from "../config/shiprocket.js";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const getResendClient = () => {
+  const apiKey = process.env.RESEND_API_KEY;
+  return apiKey ? new Resend(apiKey) : null;
+};
+
+// TEMPORARY: Remove after invoice delivery diagnosis is complete.
+const logInvoiceDiagnostic = (message) => {
+  if (process.env.NODE_ENV === "development") {
+    console.info(`[RESEND] ${message}`);
+  }
+};
+
+const sanitizeDiagnosticMessage = (error) => {
+  const message =
+    typeof error?.message === "string" ? error.message : "Unknown error";
+
+  return message
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[email redacted]")
+    .replace(/\+?\d[\d\s().-]{7,}\d/g, "[phone redacted]")
+    .replace(/https?:\/\/\S+/gi, "[URL redacted]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\bre_[A-Za-z0-9_-]+\b/g, "[API key redacted]")
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[token redacted]")
+    .slice(0, 240);
+};
+
+const getSafeStatusCode = (error) => {
+  const statusCode =
+    error?.statusCode ?? error?.status ?? error?.response?.status;
+  return Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599
+    ? statusCode
+    : "unavailable";
+};
+
+export const sendResendEmail = async ({
+  to,
+  subject,
+  text,
+  html,
+}) => {
+  const resend = getResendClient();
+
+  if (!resend) {
+    throw new Error("RESEND_API_KEY is not configured.");
+  }
+
+  const result = await resend.emails.send({
+    from: process.env.EMAIL_FROM || "noreply@bhatkar-perfumes.com",
+    to,
+    subject,
+    text,
+    html,
+  });
+
+  if (result?.error) {
+    throw new Error("Resend email delivery failed.");
+  }
+
+  return result;
+};
 
 /**
  * Sends order invoice via Resend email service
  */
 export const sendInvoiceEmail = async (order, items) => {
   const apiKey = process.env.RESEND_API_KEY;
+  const resend = getResendClient();
   const fromEmail = process.env.EMAIL_FROM || "noreply@bhatkarco.com";
 
-  if (!apiKey) {
+  if (!apiKey || !resend) {
     console.warn(
       "RESEND_API_KEY not configured. Skipping automated invoice email.",
     );
     return false;
   }
 
+  let stage = "validating invoice prerequisites";
   try {
     const to = order.customer_email || order.email;
     if (!to) {
+      logInvoiceDiagnostic(
+        "stage failed: validating invoice prerequisites; status=unavailable; message=Invoice recipient is missing",
+      );
       console.error("No recipient email found for order", order.id);
       return false;
     }
@@ -27,16 +95,21 @@ export const sendInvoiceEmail = async (order, items) => {
     console.log(`Generating Shiprocket invoice for order #${order.id}...`);
 
     if (!order.shiprocket_order_id) {
+      logInvoiceDiagnostic(
+        "stage failed: validating invoice prerequisites; status=unavailable; message=Shiprocket order ID is missing",
+      );
       console.warn(
         `Shiprocket order ID missing for order #${order.id}. Invoice email skipped.`,
       );
       return false;
     }
 
+    stage = "generating Shiprocket invoice";
     const invoiceResponse = await generateShiprocketInvoice(
       order.shiprocket_order_id,
     );
 
+    stage = "validating invoice URL";
     const invoiceUrl =
       invoiceResponse?.invoice_url ||
       invoiceResponse?.invoiceUrl ||
@@ -46,24 +119,31 @@ export const sendInvoiceEmail = async (order, items) => {
       invoiceResponse?.data?.url;
 
     if (!invoiceUrl) {
-      console.error("Shiprocket invoice URL missing:", invoiceResponse);
+      logInvoiceDiagnostic(
+        `stage failed: ${stage}; status=unavailable; message=Shiprocket invoice URL is missing`,
+      );
+      console.error("Shiprocket invoice URL missing.");
 
       return false;
     }
 
+    logInvoiceDiagnostic("invoice URL obtained");
     console.log(`Downloading Shiprocket invoice for order #${order.id}...`);
 
-    const pdfResponse = await fetch(invoiceUrl);
+    stage = "downloading Shiprocket invoice";
+    const pdfBuffer = await downloadShiprocketInvoice(invoiceUrl);
+    logInvoiceDiagnostic("invoice download completed");
 
-    if (!pdfResponse.ok) {
-      throw new Error(
-        `Failed to download Shiprocket invoice: ${pdfResponse.status} ${pdfResponse.statusText}`,
-      );
-    }
+    stage = "validating downloaded PDF";
+    const isBuffer = Buffer.isBuffer(pdfBuffer);
+    const hasContent = isBuffer && pdfBuffer.length > 0;
+    const hasPdfHeader =
+      hasContent && pdfBuffer.subarray(0, 5).toString("ascii") === "%PDF-";
+    logInvoiceDiagnostic(
+      `PDF validation: buffer=${isBuffer}; nonempty=${hasContent}; PDF header=${hasPdfHeader}; content type validated by Shiprocket downloader`,
+    );
 
-    const pdfArrayBuffer = await pdfResponse.arrayBuffer();
-    const pdfBuffer = Buffer.from(pdfArrayBuffer);
-
+    stage = "preparing invoice email";
     const subject = `Your Bhatkar Perfumes Order Invoice - #${order.id}`;
 
     // Order Summary items bullet points
@@ -110,24 +190,44 @@ export const sendInvoiceEmail = async (order, items) => {
       </div>
     `;
 
-    console.log(`Sending invoice email to ${to} via Resend...`);
-    const response = await resend.emails.send({
+    stage = "preparing attachment";
+    const attachment = {
+      filename: `Invoice_Bhatkar_${order.id}.pdf`,
+      content: pdfBuffer,
+    };
+    logInvoiceDiagnostic(
+      `attachment prepared: buffer=${Buffer.isBuffer(attachment.content)}; bytes=${Buffer.isBuffer(attachment.content) ? attachment.content.length : 0}`,
+    );
+
+    console.log("Sending invoice email via Resend...");
+    stage = "calling Resend API";
+    logInvoiceDiagnostic("calling Resend API");
+    const result = await resend.emails.send({
       from: fromEmail,
       to: to,
       subject: subject,
       html: htmlContent,
-      attachments: [
-        {
-          filename: `Invoice_Bhatkar_${order.id}.pdf`,
-          content: pdfBuffer,
-        },
-      ],
+      attachments: [attachment],
     });
 
-    //console.log("Resend email response:", response);
+    if (result?.error) {
+      logInvoiceDiagnostic(
+        `Resend API returned an error: stage=${stage}; status=${getSafeStatusCode(
+          result.error,
+        )}; message=${sanitizeDiagnosticMessage(result.error)}`,
+      );
+
+      console.error("Invoice email delivery failed.");
+      return false;
+    }
+
+    logInvoiceDiagnostic("API call completed");
     return true;
   } catch (error) {
-    console.error("Resend email delivery failed:", error);
+    logInvoiceDiagnostic(
+      `stage failed: ${stage}; status=${getSafeStatusCode(error)}; message=${sanitizeDiagnosticMessage(error)}`,
+    );
+    console.error("Invoice email delivery failed.");
     return false;
   }
 };
@@ -137,14 +237,20 @@ export const sendInvoiceEmail = async (order, items) => {
  */
 export const sendOTPEmail = async (email, otp) => {
   const apiKey = process.env.RESEND_API_KEY;
-  const fromEmail = process.env.EMAIL_FROM || "noreply@bhatkar-perfumes.com";
+  const resend = getResendClient();
+  const fromEmail = process.env.EMAIL_FROM || "noreply@bhatkarco.com";
 
-  if (!apiKey) {
-    console.warn(
-      "RESEND_API_KEY not configured. Skipping automated OTP email.",
-    );
-    console.log(`[Resend simulation] To: ${email}, OTP: ${otp}`);
-    return true; // Return true as simulation success
+  if (!apiKey || !resend) {
+    if (
+      process.env.NODE_ENV === "development" &&
+      process.env.OTP_DEV_FALLBACK === "true" &&
+      otp === "000000"
+    ) {
+      console.warn("OTP development fallback is active.");
+      return true;
+    }
+
+    throw new Error("OTP email delivery is unavailable.");
   }
 
   try {
@@ -166,18 +272,16 @@ export const sendOTPEmail = async (email, otp) => {
       </div>
     `;
 
-    console.log(`Sending OTP email to ${email} via Resend...`);
-    const response = await resend.emails.send({
+    await resend.emails.send({
       from: fromEmail,
       to: email,
       subject: subject,
       html: htmlContent,
     });
 
-    //console.log("Resend OTP email response:", response);
     return true;
-  } catch (error) {
-    console.error("Resend OTP email delivery failed:", error);
-    return false;
+  } catch {
+    console.error("OTP email delivery failed.");
+    throw new Error("OTP email delivery failed.");
   }
 };

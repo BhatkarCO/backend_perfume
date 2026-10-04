@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import dotenv from "dotenv";
 import User from "../models/User.js";
 import {
@@ -58,6 +59,34 @@ const getClearCookieOptions = () => {
   return options;
 };
 
+const getPasswordResetCookieOptions = () => ({
+  ...getCookieOptions(),
+  path: "/api/auth",
+  maxAge: 10 * 60 * 1000,
+});
+
+const getClearPasswordResetCookieOptions = () => {
+  const options = getPasswordResetCookieOptions();
+  delete options.maxAge;
+  return options;
+};
+
+const createAppToken = (user) => {
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      session_version: Number(user.session_version || 0),
+    },
+    JWT_SECRET,
+    {
+      expiresIn: JWT_EXPIRES_IN,
+      algorithm: "HS256",
+    },
+  );
+};
+
 /**
  * Register User
  */
@@ -77,9 +106,9 @@ export const register = async (req, res) => {
       return res.status(400).json({ message: "Email already registered." });
     }
 
-    // Check if an unverified registration already exists
+    const normalizedEmail = email.toLowerCase();
     const existingOTP = await OTP.findOne({
-      email: email.toLowerCase(),
+      email: normalizedEmail,
       purpose: "register",
     });
     if (existingOTP) {
@@ -100,29 +129,52 @@ export const register = async (req, res) => {
     const hashedOTP = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    // Store or replace OTP record
+    // Replace the registration challenge without resetting its attempt count.
     if (existingOTP) {
-      existingOTP.otp = hashedOTP;
-      existingOTP.userData = {
-        name,
-        password: passwordHash,
-        phone: phone || null,
-      };
-      existingOTP.expiresAt = expiresAt;
-      existingOTP.attempts = 0;
-      existingOTP.lastSentAt = new Date();
-      existingOTP.verified = false;
-      await existingOTP.save();
+      const updatedOTP = await OTP.findOneAndUpdate(
+        {
+          _id: existingOTP._id,
+          lastSentAt: existingOTP.lastSentAt,
+          attempts: { $lt: 5 },
+        },
+        {
+          $set: {
+            otp: hashedOTP,
+            userData: {
+              name,
+              password: passwordHash,
+              phone: phone || null,
+            },
+            expiresAt,
+            lastSentAt: new Date(),
+            verified: false,
+          },
+        },
+      );
+      if (!updatedOTP) {
+        return res.status(429).json({
+          message: "Please wait before requesting another OTP.",
+        });
+      }
     } else {
       const otpDoc = new OTP({
-        email: email.toLowerCase(),
+        email: normalizedEmail,
         otp: hashedOTP,
         purpose: "register",
         userData: { name, password: passwordHash, phone: phone || null },
         expiresAt,
         lastSentAt: new Date(),
       });
-      await otpDoc.save();
+      try {
+        await otpDoc.save();
+      } catch (error) {
+        if (error?.code === 11000) {
+          return res.status(429).json({
+            message: "Please wait before requesting another OTP.",
+          });
+        }
+        throw error;
+      }
     }
 
     // Send OTP email via Resend
@@ -169,13 +221,7 @@ export const login = async (req, res) => {
     }
 
     // Generate JWT
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      {
-        expiresIn: JWT_EXPIRES_IN,
-      },
-    );
+    const token = createAppToken(user);
 
     res.cookie("token", token, getCookieOptions());
 
@@ -214,7 +260,7 @@ export const googleAuth = async (req, res) => {
 
     return res.redirect(authUrl);
   } catch (error) {
-    console.error("Google OAuth initialization failed:", error);
+    console.error("Google OAuth initialization failed.");
 
     return res.status(500).json({
       message: "Unable to start Google authentication.",
@@ -254,6 +300,12 @@ export const googleAuthCallback = async (req, res) => {
 
     const { googleId, email, name, emailVerified } = googleUser;
 
+    if (emailVerified !== true) {
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/login?error=google_auth_failed`,
+      );
+    }
+
     let user = await User.findOne({ email });
 
     // ------------------------------------------------
@@ -271,9 +323,7 @@ export const googleAuthCallback = async (req, res) => {
       // Link Google account to existing user
       user.google_id = googleId;
 
-      if (emailVerified) {
-        user.is_verified = true;
-      }
+      user.is_verified = true;
 
       await user.save();
     }
@@ -287,7 +337,7 @@ export const googleAuthCallback = async (req, res) => {
         name,
         google_id: googleId,
         auth_provider: "google",
-        is_verified: emailVerified,
+        is_verified: true,
         role: "user",
       });
     }
@@ -296,16 +346,7 @@ export const googleAuthCallback = async (req, res) => {
     // Create YOUR application's JWT
     // ------------------------------------------------
 
-    const token = jwt.sign(
-      {
-        id: user.id,
-        role: user.role,
-      },
-      JWT_SECRET,
-      {
-        expiresIn: JWT_EXPIRES_IN,
-      },
-    );
+    const token = createAppToken(user);
 
     // ------------------------------------------------
     // Store JWT in HttpOnly cookie
@@ -319,10 +360,7 @@ export const googleAuthCallback = async (req, res) => {
 
     return res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
   } catch (error) {
-    console.error(
-      "Google OAuth callback failed:",
-      error.response?.data || error.message || error,
-    );
+    console.error("Google OAuth callback failed.");
 
     return res.redirect(
       `${process.env.FRONTEND_URL}/login?error=google_auth_failed`,
@@ -341,34 +379,21 @@ export const verifyOTP = async (req, res) => {
   }
 
   try {
-    const otpRecord = await OTP.findOne({
-      email: email.toLowerCase(),
-      purpose: "register",
-    });
+    const now = new Date();
+    const otpRecord = await OTP.findOneAndUpdate(
+      {
+        email: email.toLowerCase(),
+        purpose: "register",
+        expiresAt: { $gt: now },
+        attempts: { $lt: 5 },
+      },
+      { $inc: { attempts: 1 } },
+      { returnDocument: "after" },
+    );
     if (!otpRecord) {
       return res.status(400).json({
-        message:
-          "Verification record not found or expired. Please register again.",
+        message: "Invalid, expired, or exhausted OTP. Please register again.",
       });
-    }
-
-    // Check attempts limit (max 5 attempts)
-    if (otpRecord.attempts >= 5) {
-      return res.status(400).json({
-        message:
-          "Maximum verification attempts exceeded. Please register again.",
-      });
-    }
-
-    // Increment attempts
-    otpRecord.attempts += 1;
-    await otpRecord.save();
-
-    // Check expiration
-    if (new Date() > otpRecord.expiresAt) {
-      return res
-        .status(400)
-        .json({ message: "OTP has expired. Please register again." });
     }
 
     // Compare OTP
@@ -377,11 +402,18 @@ export const verifyOTP = async (req, res) => {
       return res.status(400).json({ message: "Invalid OTP code." });
     }
 
+    const consumedOTP = await OTP.findOneAndDelete({
+      _id: otpRecord._id,
+      otp: otpRecord.otp,
+      expiresAt: { $gt: new Date() },
+      attempts: { $lte: 5 },
+    });
+    if (!consumedOTP) {
+      return res.status(400).json({ message: "Invalid or expired OTP code." });
+    }
+
     // If valid, create user
     const { name, password, phone } = otpRecord.userData;
-
-    // Clean up if there's any existing unverified user model (precaution)
-    await User.deleteOne({ email: email.toLowerCase() });
 
     const user = new User({
       email: email.toLowerCase(),
@@ -393,17 +425,8 @@ export const verifyOTP = async (req, res) => {
 
     await user.save();
 
-    // Delete OTP record immediately
-    await OTP.deleteOne({ _id: otpRecord._id });
-
     // Generate JWT token so user gets logged in immediately
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      JWT_SECRET,
-      {
-        expiresIn: JWT_EXPIRES_IN,
-      },
-    );
+    const token = createAppToken(user);
 
     res.cookie("token", token, getCookieOptions());
 
@@ -452,17 +475,34 @@ export const resendOTP = async (req, res) => {
       });
     }
 
-    // Generate new OTP
+    // Generate a replacement without resetting accumulated verification attempts.
     const otp = generateOTP();
     const hashedOTP = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
 
-    otpRecord.otp = hashedOTP;
-    otpRecord.expiresAt = expiresAt;
-    otpRecord.attempts = 0; // reset attempts
-    otpRecord.lastSentAt = new Date();
-    otpRecord.verified = false;
-    await otpRecord.save();
+    const updatedOTP = await OTP.findOneAndUpdate(
+      {
+        _id: otpRecord._id,
+        lastSentAt: otpRecord.lastSentAt,
+        attempts: { $lt: 5 },
+      },
+      {
+        $set: {
+          otp: hashedOTP,
+          expiresAt,
+          lastSentAt: new Date(),
+          verified: false,
+          resetAuthorizationHash: null,
+          resetAuthorizationExpiresAt: null,
+        },
+      },
+      { returnDocument: "after" },
+    );
+    if (!updatedOTP) {
+      return res.status(429).json({
+        message: "OTP attempt limit reached or resend already processed.",
+      });
+    }
 
     // Send email
     await sendOTPEmail(email.toLowerCase(), otp);
@@ -501,8 +541,8 @@ export const forgotPassword = async (req, res) => {
     if (existingOTP) {
       const elapsed = Date.now() - new Date(existingOTP.lastSentAt).getTime();
       if (elapsed < 60000) {
-        return res.status(429).json({
-          message: `Please wait ${Math.ceil((60000 - elapsed) / 1000)} seconds before requesting a new OTP.`,
+        return res.status(200).json({
+          message: "If email exists, a reset code has been sent.",
         });
       }
     }
@@ -512,17 +552,35 @@ export const forgotPassword = async (req, res) => {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     if (existingOTP) {
-      existingOTP.otp = hashedOTP;
-      existingOTP.expiresAt = expiresAt;
-      existingOTP.attempts = 0;
-      existingOTP.lastSentAt = new Date();
-      existingOTP.verified = false;
-      await existingOTP.save();
+      const updatedOTP = await OTP.findOneAndUpdate(
+        {
+          _id: existingOTP._id,
+          lastSentAt: existingOTP.lastSentAt,
+          attempts: { $lt: 5 },
+        },
+        {
+          $set: {
+            otp: hashedOTP,
+            expiresAt,
+            lastSentAt: new Date(),
+            verified: false,
+            userId: user._id,
+            resetAuthorizationHash: null,
+            resetAuthorizationExpiresAt: null,
+          },
+        },
+      );
+      if (!updatedOTP) {
+        return res.status(200).json({
+          message: "If email exists, a reset code has been sent.",
+        });
+      }
     } else {
       const otpDoc = new OTP({
         email: email.toLowerCase(),
         otp: hashedOTP,
         purpose: "forgot-password",
+        userId: user._id,
         expiresAt,
         lastSentAt: new Date(),
       });
@@ -552,43 +610,80 @@ export const verifyForgotPasswordOTP = async (req, res) => {
   }
 
   try {
-    const otpRecord = await OTP.findOne({
-      email: email.toLowerCase(),
-      purpose: "forgot-password",
-    });
+    const normalizedEmail = email.toLowerCase();
+    const now = new Date();
+    const otpRecord = await OTP.findOneAndUpdate(
+      {
+        email: normalizedEmail,
+        purpose: "forgot-password",
+        verified: false,
+        expiresAt: { $gt: now },
+        attempts: { $lt: 5 },
+        userId: { $exists: true },
+      },
+      { $inc: { attempts: 1 } },
+      { returnDocument: "after" },
+    );
+
     if (!otpRecord) {
       return res.status(400).json({
-        message: "Reset code not found or expired. Please request again.",
+        message: "Invalid or expired reset code. Please request a new one.",
       });
     }
 
-    // Check attempts limit (max 5 attempts)
-    if (otpRecord.attempts >= 5) {
+    const user = await User.findOne({
+      _id: otpRecord.userId,
+      email: normalizedEmail,
+    });
+    if (!user) {
       return res.status(400).json({
-        message: "Maximum reset code attempts exceeded. Please try again.",
+        message: "Invalid or expired reset code. Please request a new one.",
       });
     }
 
-    // Increment attempts
-    otpRecord.attempts += 1;
-    await otpRecord.save();
-
-    // Check expiration
-    if (new Date() > otpRecord.expiresAt) {
-      return res
-        .status(400)
-        .json({ message: "Reset code has expired. Please try again." });
-    }
-
-    // Compare OTP
     const isMatch = await bcrypt.compare(otp, otpRecord.otp);
     if (!isMatch) {
       return res.status(400).json({ message: "Invalid OTP code." });
     }
 
-    // Mark as verified
-    otpRecord.verified = true;
-    await otpRecord.save();
+    const resetAuthorization = crypto.randomBytes(32).toString("hex");
+    const resetAuthorizationHash = crypto
+      .createHash("sha256")
+      .update(resetAuthorization)
+      .digest("hex");
+    const resetAuthorizationExpiresAt = new Date(
+      Math.min(otpRecord.expiresAt.getTime(), Date.now() + 10 * 60 * 1000),
+    );
+    const authorizedRecord = await OTP.findOneAndUpdate(
+      {
+        _id: otpRecord._id,
+        userId: otpRecord.userId,
+        otp: otpRecord.otp,
+        attempts: otpRecord.attempts,
+        verified: false,
+        expiresAt: { $gt: new Date() },
+      },
+      {
+        $set: {
+          verified: true,
+          resetAuthorizationHash,
+          resetAuthorizationExpiresAt,
+        },
+      },
+      { returnDocument: "after" },
+    );
+
+    if (!authorizedRecord) {
+      return res.status(400).json({
+        message: "Invalid or expired reset code. Please request a new one.",
+      });
+    }
+
+    res.cookie(
+      "password_reset_token",
+      resetAuthorization,
+      getPasswordResetCookieOptions(),
+    );
 
     res.status(200).json({
       message: "OTP verified successfully. You can now reset your password.",
@@ -612,40 +707,73 @@ export const resetPassword = async (req, res) => {
   }
 
   try {
-    // Check if they verified the OTP first
-    const otpRecord = await OTP.findOne({
-      email: email.toLowerCase(),
-      purpose: "forgot-password",
-    });
-    if (!otpRecord || !otpRecord.verified) {
+    const resetAuthorization = req.cookies.password_reset_token;
+    if (!resetAuthorization) {
       return res.status(400).json({
         message:
           "Password reset request unauthorized. Please verify OTP first.",
       });
     }
 
-    // Check expiration of OTP
-    if (new Date() > otpRecord.expiresAt) {
-      return res
-        .status(400)
-        .json({ message: "Reset code has expired. Please verify OTP again." });
-    }
-
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      return res.status(400).json({ message: "User not found." });
-    }
-
-    // Hash new password
+    const normalizedEmail = email.toLowerCase();
+    const resetAuthorizationHash = crypto
+      .createHash("sha256")
+      .update(resetAuthorization)
+      .digest("hex");
     const newPasswordHash = await bcrypt.hash(newPassword, 10);
+    const otpRecord = await OTP.findOneAndUpdate(
+      {
+        email: normalizedEmail,
+        purpose: "forgot-password",
+        verified: true,
+        resetAuthorizationHash,
+        resetAuthorizationExpiresAt: { $gt: new Date() },
+        expiresAt: { $gt: new Date() },
+        userId: { $exists: true },
+      },
+      {
+        $unset: {
+          resetAuthorizationHash: 1,
+          resetAuthorizationExpiresAt: 1,
+        },
+      },
+      { returnDocument: "after" },
+    );
 
-    // Update user password
-    user.password_hash = newPasswordHash;
-    user.is_verified = true;
-    await user.save();
+    if (!otpRecord) {
+      return res.status(400).json({
+        message:
+          "Password reset request unauthorized. Please verify OTP first.",
+      });
+    }
 
-    // Delete OTP record immediately after successful reset
-    await OTP.deleteOne({ _id: otpRecord._id });
+    const user = await User.findOneAndUpdate(
+      { _id: otpRecord.userId, email: normalizedEmail },
+      {
+        $set: {
+          password_hash: newPasswordHash,
+          is_verified: true,
+        },
+        $inc: { session_version: 1 },
+      },
+      { returnDocument: "after" },
+    );
+
+    if (!user) {
+      res.clearCookie(
+        "password_reset_token",
+        getClearPasswordResetCookieOptions(),
+      );
+      return res.status(400).json({
+        message:
+          "Password reset request unauthorized. Please verify OTP first.",
+      });
+    }
+
+    res.clearCookie(
+      "password_reset_token",
+      getClearPasswordResetCookieOptions(),
+    );
 
     res
       .status(200)
@@ -678,10 +806,22 @@ export const getCurrentUser = async (req, res) => {
 };
 
 //logout user and clear the token cookie
-export const logout = (req, res) => {
-  res.clearCookie("token", getClearCookieOptions());
+export const logout = async (req, res) => {
+  try {
+    await User.findByIdAndUpdate(req.user.id, {
+      $inc: { session_version: 1 },
+    });
 
-  res.status(200).json({
-    message: "Logged out successfully.",
-  });
+    res.clearCookie("token", getClearCookieOptions());
+
+    return res.status(200).json({
+      message: "Logged out successfully.",
+    });
+  } catch (error) {
+    console.error("Logout error:", error);
+
+    return res.status(500).json({
+      message: "Unable to logout.",
+    });
+  }
 };

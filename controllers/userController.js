@@ -1,9 +1,9 @@
-import bcrypt from 'bcryptjs';
-import User from '../models/User.js';
-import Address from '../models/Address.js';
-import Wishlist from '../models/Wishlist.js';
-import Review from '../models/Review.js';
-import Order from '../models/Order.js';
+import bcrypt from "bcryptjs";
+import User from "../models/User.js";
+import Address from "../models/Address.js";
+import Wishlist from "../models/Wishlist.js";
+import Review from "../models/Review.js";
+import Order from "../models/Order.js";
 import crypto from "crypto";
 import OTP from "../models/OTP.js";
 import { sendOTPEmail } from "../utils/resendEmail.js";
@@ -12,20 +12,22 @@ import { generateOTP } from "../utils/otp.js";
 /**
  * Get user profile details
  */
-  export const getUserProfile = async (req, res) => {
+export const getUserProfile = async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const user = await User.findById(userId).select('id email role name phone is_verified created_at');
+    const user = await User.findById(userId).select(
+      "id email role name phone is_verified created_at",
+    );
 
     if (!user) {
-      return res.status(404).json({ message: 'User not found.' });
+      return res.status(404).json({ message: "User not found." });
     }
 
     res.status(200).json(user);
   } catch (error) {
-    console.error('Fetch user profile error:', error);
-    res.status(500).json({ message: 'Error retrieving profile.' });
+    console.error("Fetch user profile error:", error);
+    res.status(500).json({ message: "Error retrieving profile." });
   }
 };
 
@@ -37,24 +39,24 @@ export const updateUserProfile = async (req, res) => {
   const { name, phone } = req.body;
 
   if (!name) {
-    return res.status(400).json({ message: 'Name is required.' });
+    return res.status(400).json({ message: "Name is required." });
   }
 
   try {
     const user = await User.findByIdAndUpdate(
       userId,
       { name, phone: phone || null },
-      { new: true }
-    ).select('id email role name phone is_verified');
+      { returnDocument: "after" },
+    ).select("id email role name phone is_verified");
 
     if (!user) {
-      return res.status(404).json({ message: 'User not found.' });
+      return res.status(404).json({ message: "User not found." });
     }
 
-    res.status(200).json({ message: 'Profile updated successfully.', user });
+    res.status(200).json({ message: "Profile updated successfully.", user });
   } catch (error) {
-    console.error('Update profile error:', error);
-    res.status(500).json({ message: 'Error updating profile.' });
+    console.error("Update profile error:", error);
+    res.status(500).json({ message: "Error updating profile." });
   }
 };
 
@@ -66,30 +68,33 @@ export const changePassword = async (req, res) => {
   const { oldPassword, newPassword } = req.body;
 
   if (!oldPassword || !newPassword) {
-    return res.status(400).json({ message: 'Old and new passwords are required.' });
+    return res
+      .status(400)
+      .json({ message: "Old and new passwords are required." });
   }
 
   try {
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ message: 'User not found.' });
+      return res.status(404).json({ message: "User not found." });
     }
 
     // Check old password
     const isMatch = await bcrypt.compare(oldPassword, user.password_hash);
     if (!isMatch) {
-      return res.status(400).json({ message: 'Incorrect old password.' });
+      return res.status(400).json({ message: "Incorrect old password." });
     }
 
     // Hash and save new password
     const newPasswordHash = await bcrypt.hash(newPassword, 10);
     user.password_hash = newPasswordHash;
+    user.session_version = Number(user.session_version || 0) + 1;
     await user.save();
 
-    res.status(200).json({ message: 'Password updated successfully.' });
+    res.status(200).json({ message: "Password updated successfully." });
   } catch (error) {
-    console.error('Change password error:', error);
-    res.status(500).json({ message: 'Error updating password.' });
+    console.error("Change password error:", error);
+    res.status(500).json({ message: "Error updating password." });
   }
 };
 
@@ -123,13 +128,12 @@ export const requestDeleteAccountOTP = async (req, res) => {
 
     // 60-second resend limit
     if (existingOTP) {
-      const elapsed =
-        Date.now() - new Date(existingOTP.lastSentAt).getTime();
+      const elapsed = Date.now() - new Date(existingOTP.lastSentAt).getTime();
 
       if (elapsed < 60000) {
         return res.status(429).json({
           message: `Please wait ${Math.ceil(
-            (60000 - elapsed) / 1000
+            (60000 - elapsed) / 1000,
           )} seconds before requesting another OTP.`,
         });
       }
@@ -142,13 +146,27 @@ export const requestDeleteAccountOTP = async (req, res) => {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     if (existingOTP) {
-      existingOTP.otp = hashedOTP;
-      existingOTP.expiresAt = expiresAt;
-      existingOTP.attempts = 0;
-      existingOTP.lastSentAt = new Date();
-      existingOTP.verified = false;
-
-      await existingOTP.save();
+      const updatedOTP = await OTP.findOneAndUpdate(
+        {
+          _id: existingOTP._id,
+          lastSentAt: existingOTP.lastSentAt,
+          attempts: { $lt: 5 },
+        },
+        {
+          $set: {
+            otp: hashedOTP,
+            expiresAt,
+            lastSentAt: new Date(),
+            verified: false,
+          },
+        },
+        { returnDocument: "after" },
+      );
+      if (!updatedOTP) {
+        return res.status(429).json({
+          message: "OTP attempt limit reached or resend already processed.",
+        });
+      }
     } else {
       existingOTP = new OTP({
         email: user.email,
@@ -166,7 +184,6 @@ export const requestDeleteAccountOTP = async (req, res) => {
     return res.status(200).json({
       message: "OTP sent to your registered email.",
     });
-
   } catch (error) {
     console.error("Delete account OTP error:", error);
 
@@ -218,34 +235,19 @@ export const deleteUserAccount = async (req, res) => {
     }
 
     // Find delete-account OTP
-    const otpRecord = await OTP.findOne({
-      email: user.email,
-      purpose: "delete-account",
-    });
-
+    const otpRecord = await OTP.findOneAndUpdate(
+      {
+        email: user.email,
+        purpose: "delete-account",
+        expiresAt: { $gt: new Date() },
+        attempts: { $lt: 5 },
+      },
+      { $inc: { attempts: 1 } },
+      { returnDocument: "after" },
+    );
     if (!otpRecord) {
       return res.status(400).json({
-        message: "No deletion OTP found. Please request a new OTP.",
-      });
-    }
-
-    // Maximum attempts
-    if (otpRecord.attempts >= 5) {
-      return res.status(400).json({
-        message: "Maximum OTP attempts exceeded. Please request a new OTP.",
-      });
-    }
-
-    // Increment attempts
-    otpRecord.attempts += 1;
-    await otpRecord.save();
-
-    // Check expiry
-    if (new Date() > otpRecord.expiresAt) {
-      await OTP.deleteOne({ _id: otpRecord._id });
-
-      return res.status(400).json({
-        message: "OTP has expired. Please request a new one.",
+        message: "Invalid, expired, or exhausted OTP.",
       });
     }
 
@@ -258,8 +260,16 @@ export const deleteUserAccount = async (req, res) => {
       });
     }
 
-    // OTP verified → remove it
-    await OTP.deleteOne({ _id: otpRecord._id });
+    // Consume the OTP atomically so only one concurrent request can proceed.
+    const consumedOTP = await OTP.findOneAndDelete({
+      _id: otpRecord._id,
+      otp: otpRecord.otp,
+      expiresAt: { $gt: new Date() },
+      attempts: { $lte: 5 },
+    });
+    if (!consumedOTP) {
+      return res.status(400).json({ message: "Invalid or expired OTP." });
+    }
 
     // Delete associated addresses
     await Address.deleteMany({ user_id: userId });
@@ -268,16 +278,10 @@ export const deleteUserAccount = async (req, res) => {
     await Wishlist.deleteMany({ user_id: userId });
 
     // Disassociate reviews
-    await Review.updateMany(
-      { user_id: userId },
-      { $unset: { user_id: 1 } }
-    );
+    await Review.updateMany({ user_id: userId }, { $unset: { user_id: 1 } });
 
     // Disassociate orders
-    await Order.updateMany(
-      { user_id: userId },
-      { $unset: { user_id: 1 } }
-    );
+    await Order.updateMany({ user_id: userId }, { $unset: { user_id: 1 } });
 
     // Delete user
     await User.findByIdAndDelete(userId);
@@ -292,7 +296,6 @@ export const deleteUserAccount = async (req, res) => {
     return res.status(200).json({
       message: "Account deleted successfully.",
     });
-
   } catch (error) {
     console.error("Delete account error:", error);
 

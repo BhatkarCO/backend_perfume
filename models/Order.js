@@ -7,15 +7,31 @@ const orderItemSchema = new mongoose.Schema(
       ref: "Product",
       required: true,
     },
-    quantity: { type: Number, required: true },
-    price_at_purchase: { type: Number, required: true },
+    quantity: {
+      type: Number,
+      required: true,
+      min: 1,
+      validate: {
+        validator: Number.isInteger,
+        message: "Quantity must be an integer.",
+      },
+    },
+    price_at_purchase: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
   },
   { _id: false },
 ); // No _id for order items is fine, or default to yes. Usually false is clean.
 
 const orderSchema = new mongoose.Schema(
   {
-    user_id: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    user_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
     status: {
       type: String,
       default: "Pending",
@@ -39,6 +55,17 @@ const orderSchema = new mongoose.Schema(
       enum: ["Pending", "Paid", "Failed"],
       default: "Pending",
     },
+    inventory_status: {
+      type: String,
+      enum: ["Reserved", "Committed", "Released"],
+    },
+    inventory_reserved_at: { type: Date },
+    inventory_reservation_expires_at: { type: Date },
+    inventory_released_at: { type: Date },
+    inventory_release_reason: { type: String },
+    razorpay_order_created_at: { type: Date },
+    razorpay_capture_claimed_payment_id: { type: String },
+    razorpay_capture_claimed_at: { type: Date },
     total_amount: { type: Number, required: true },
 
     pricing: {
@@ -86,6 +113,7 @@ const orderSchema = new mongoose.Schema(
       type: String,
       enum: [
         "Created",
+        "AWB_PENDING",
         "AWB_ASSIGNED",
         "PICKUP_SCHEDULED",
         "PICKED_UP",
@@ -102,6 +130,20 @@ const orderSchema = new mongoose.Schema(
     },
     razorpay_order_id: { type: String },
     razorpay_payment_id: { type: String },
+    shiprocket_registered: {
+      type: Boolean,
+      default: false,
+    },
+
+    confirmation_email_sent: {
+      type: Boolean,
+      default: false,
+    },
+
+    invoice_email_sent: {
+      type: Boolean,
+      default: false,
+    },
     items: [orderItemSchema],
   },
   {

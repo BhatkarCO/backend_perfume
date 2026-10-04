@@ -1,6 +1,8 @@
 import crypto from "crypto";
+import mongoose from "mongoose";
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
+import InventoryLog from "../models/InventoryLog.js";
 import Address from "../models/Address.js";
 import Coupon from "../models/Coupon.js";
 import { calculateFinalAmount } from "../utils/pricing.js";
@@ -12,13 +14,19 @@ import {
   generateShiprocketPickup,
   getShiprocketTracking,
   generateShiprocketInvoice,
+  downloadShiprocketInvoice,
   SHIPROCKET_CONFIG,
 } from "../config/shiprocket.js";
-import Payment from "../models/Payment.js";
 import User from "../models/User.js";
-import InventoryLog from "../models/InventoryLog.js";
-import razorpayInstance, { isMockMode } from "../config/razorpay.js";
-import { sendEmail } from "../utils/email.js";
+import razorpayInstance, {
+  isMockMode,
+  MANUAL_CAPTURE_WINDOW_MS,
+} from "../config/razorpay.js";
+import {
+  captureAuthorizedPayment,
+  finalizeSuccessfulPayment,
+} from "../services/paymentService.js";
+import { sendResendEmail, sendInvoiceEmail } from "../utils/resendEmail.js";
 const COD_CHARGE = 65;
 const FREE_SHIPPING_MIN_ITEMS = 2;
 
@@ -97,7 +105,6 @@ const buildShiprocketOrderPayload = ({
   codCharge = 0,
 }) => {
   const orderDate = new Date().toISOString().slice(0, 19).replace("T", " ");
-  console.log(JSON.stringify(items, null, 2));
   return {
     order_id: localOrderId,
     order_date: orderDate,
@@ -242,8 +249,6 @@ const registerShiprocketShipment = async ({
         );
         payload.pickup_location = fallbackPickupLocation;
         createResponse = await createShiprocketOrder(payload);
-        console.log("========== SHIPROCKET RETRY RESPONSE ==========");
-        console.log(JSON.stringify(createResponse, null, 2));
       } else {
         throw error;
       }
@@ -257,26 +262,9 @@ const registerShiprocketShipment = async ({
       createResponse.data?.order_id;
 
     if (!shipmentId) {
-      // Log payload and full response for debugging when Shiprocket doesn't return shipment_id
-      try {
-        console.error(
-          "Shiprocket create order payload:",
-          JSON.stringify(payload, null, 2),
-        );
-      } catch (e) {
-        console.error("Shiprocket create order payload (stringify failed)", e);
-      }
-      try {
-        console.error(
-          "Shiprocket create response:",
-          JSON.stringify(createResponse, null, 2),
-        );
-      } catch (e) {
-        console.error(
-          "Shiprocket create response (stringify failed)",
-          createResponse,
-        );
-      }
+      console.error("Shiprocket create order failed: shipment_id missing.", {
+        orderId: order.id,
+      });
 
       throw new Error("Shiprocket did not return a shipment_id.");
     }
@@ -319,16 +307,15 @@ const registerShiprocketShipment = async ({
     const assignedShipmentId = shiprocketData?.shipment_id || shipmentId;
 
     if (!awbCode) {
-      console.error("========== SHIPROCKET AWB ASSIGN FAILED ==========");
+      console.warn(
+        "Shiprocket AWB is pending. The shipment was created but no AWB was assigned.",
+      );
 
-      console.error(JSON.stringify(assignResponse, null, 2));
-
-      // Use a status that your existing schema already accepts
-      order.shiprocket_status = "Failed";
+      order.shiprocket_status = "AWB_PENDING";
 
       await order.save();
 
-      throw new Error("AWB not Assigned");
+      return order;
     }
 
     // Save Shiprocket details
@@ -346,12 +333,36 @@ const registerShiprocketShipment = async ({
   } catch (error) {
     console.error("Shiprocket API error:", {
       status: error.response?.status,
-      message: error.message,
-      response: error.response?.data,
     });
 
     return order;
   }
+};
+
+const validateOrderItems = (items) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return "At least one product is required.";
+  }
+
+  if (items.length > 50) {
+    return "Too many items in one order.";
+  }
+
+  for (const item of items) {
+    if (!item?.productId) {
+      return "Invalid product ID.";
+    }
+
+    if (
+      !Number.isInteger(item.quantity) ||
+      item.quantity < 1 ||
+      item.quantity > 20
+    ) {
+      return "Quantity must be an integer between 1 and 20.";
+    }
+  }
+
+  return null;
 };
 
 /**
@@ -369,6 +380,13 @@ export const previewOrder = async (req, res) => {
     couponCode,
     paymentMethod = "RAZORPAY",
   } = req.body;
+  const validationError = validateOrderItems(items);
+
+  if (validationError) {
+    return res.status(400).json({
+      message: validationError,
+    });
+  }
 
   if (!items || items.length === 0 || !shippingAddressId) {
     return res.status(400).json({
@@ -544,147 +562,10 @@ export const previewOrder = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error(error);
+    console.error("Order preview failed.");
 
     return res.status(500).json({
       message: "Unable to preview order pricing.",
-    });
-  }
-};
-
-/**
- * Razorpay Webhook
- *
- * Receives Razorpay payment events and synchronizes
- * the local order payment status.
- */
-export const razorpayWebhook = async (req, res) => {
-  try {
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
-
-    if (!webhookSecret) {
-      console.error("RAZORPAY_WEBHOOK_SECRET is not configured.");
-      return res.status(500).json({
-        message: "Webhook configuration error.",
-      });
-    }
-
-    // req.body is a Buffer because server.js uses express.raw()
-    const signature = req.headers["x-razorpay-signature"];
-
-    if (!signature) {
-      return res.status(400).json({
-        message: "Missing Razorpay webhook signature.",
-      });
-    }
-
-    const expectedSignature = crypto
-      .createHmac("sha256", webhookSecret)
-      .update(req.body)
-      .digest("hex");
-
-    if (
-      !crypto.timingSafeEqual(
-        Buffer.from(signature),
-        Buffer.from(expectedSignature),
-      )
-    ) {
-      console.error("Invalid Razorpay webhook signature.");
-      return res.status(400).json({
-        message: "Invalid webhook signature.",
-      });
-    }
-
-    const payload = JSON.parse(req.body.toString("utf8"));
-
-    const event = payload.event;
-
-    console.log(`Razorpay webhook received: ${event}`);
-
-    // Payment captured successfully
-    if (event === "payment.captured") {
-      const payment = payload.payload?.payment?.entity;
-
-      const razorpayOrderId = payment?.order_id;
-      const razorpayPaymentId = payment?.id;
-
-      if (!razorpayOrderId || !razorpayPaymentId) {
-        return res.status(400).json({
-          message: "Invalid payment webhook payload.",
-        });
-      }
-
-      const order = await Order.findOne({
-        razorpay_order_id: razorpayOrderId,
-      });
-
-      if (!order) {
-        console.warn(
-          `No local order found for Razorpay order ${razorpayOrderId}`,
-        );
-
-        // Acknowledge webhook so Razorpay doesn't repeatedly retry it.
-        return res.status(200).json({
-          received: true,
-        });
-      }
-
-      // Idempotency: don't modify an already-paid order
-      if (order.payment_status !== "Paid") {
-        order.payment_status = "Paid";
-        order.status = "Confirmed";
-        order.razorpay_payment_id = razorpayPaymentId;
-
-        await order.save();
-
-        console.log(`Order ${order._id} marked as paid.`);
-      }
-
-      return res.status(200).json({
-        received: true,
-      });
-    }
-
-    // Payment failed
-    if (event === "payment.failed") {
-      const payment = payload.payload?.payment?.entity;
-
-      const razorpayOrderId = payment?.order_id;
-
-      if (!razorpayOrderId) {
-        return res.status(400).json({
-          message: "Invalid payment failure webhook payload.",
-        });
-      }
-
-      const order = await Order.findOne({
-        razorpay_order_id: razorpayOrderId,
-      });
-
-      if (order) {
-        // Don't overwrite a payment that has already succeeded.
-        if (order.payment_status !== "Paid") {
-          order.payment_status = "Failed";
-          await order.save();
-
-          console.log(`Order ${order._id} payment marked as failed.`);
-        }
-      }
-
-      return res.status(200).json({
-        received: true,
-      });
-    }
-
-    // We don't need to process every Razorpay event.
-    return res.status(200).json({
-      received: true,
-    });
-  } catch (error) {
-    console.error("Razorpay webhook error:", error);
-
-    return res.status(500).json({
-      message: "Webhook processing failed.",
     });
   }
 };
@@ -695,6 +576,13 @@ export const razorpayWebhook = async (req, res) => {
 export const createOrder = async (req, res) => {
   const userId = req.user.id;
   const { items, shippingAddressId, couponCode, paymentMethod } = req.body; // items: [{ productId, quantity }]
+  const validationError = validateOrderItems(items);
+
+  if (validationError) {
+    return res.status(400).json({
+      message: validationError,
+    });
+  }
 
   if (!items || items.length === 0 || !shippingAddressId) {
     return res
@@ -755,7 +643,19 @@ export const createOrder = async (req, res) => {
         : Number(recommendedCourier.freight_charge);
 
     // 2. Fetch products and calculate total cost in a single batch query
-    const productIds = items.map((item) => item.productId);
+    const quantitiesByProduct = new Map();
+    for (const item of items) {
+      const productId = String(item.productId);
+      quantitiesByProduct.set(
+        productId,
+        (quantitiesByProduct.get(productId) || 0) + item.quantity,
+      );
+    }
+    const aggregatedItems = Array.from(
+      quantitiesByProduct,
+      ([productId, quantity]) => ({ productId, quantity }),
+    );
+    const productIds = aggregatedItems.map((item) => item.productId);
     const products = await Product.find({ _id: { $in: productIds } }).lean();
 
     const productMap = {};
@@ -768,7 +668,7 @@ export const createOrder = async (req, res) => {
 
     const itemsWithPrice = [];
 
-    for (const item of items) {
+    for (const item of aggregatedItems) {
       const product = productMap[item.productId];
       if (!product) {
         return res
@@ -835,13 +735,15 @@ export const createOrder = async (req, res) => {
     pricing.final_payable = totalAmount;
 
     // 4. Create local order record in 'Pending' status
-    const newOrder = new Order({
+    let newOrder = new Order({
       user_id: userId,
 
       status: "Pending",
 
       payment_method: paymentMethod,
       payment_status: "Pending",
+      inventory_status: "Reserved",
+      inventory_reserved_at: new Date(),
 
       total_amount: totalAmount,
 
@@ -866,17 +768,89 @@ export const createOrder = async (req, res) => {
       })),
     });
 
-    await newOrder.save();
     const localOrderId = newOrder.id;
+
+    // Create the provider order before reserving stock so a provider failure
+    // cannot leave inventory held by an order that has no payment session.
+    let rzpOrderId = null;
+    if (paymentMethod !== "COD") {
+      rzpOrderId = `mock_order_${localOrderId}_${Date.now()}`;
+
+      if (!isMockMode()) {
+        try {
+          const options = {
+            amount: Math.round(totalAmount * 100),
+            currency: "INR",
+            receipt: `receipt_order_${localOrderId}`,
+          };
+          const rzpOrder = await razorpayInstance.orders.create(options);
+          rzpOrderId = rzpOrder.id;
+          const providerCreatedAt = new Date(
+            Number(rzpOrder.created_at) * 1000,
+          );
+          if (Number.isFinite(providerCreatedAt.getTime())) {
+            newOrder.razorpay_order_created_at = providerCreatedAt;
+            newOrder.inventory_reservation_expires_at = new Date(
+              providerCreatedAt.getTime() + MANUAL_CAPTURE_WINDOW_MS,
+            );
+          }
+        } catch (rzpErr) {
+          console.error("Razorpay order creation failed.");
+          throw rzpErr;
+        }
+      }
+
+      newOrder.razorpay_order_id = rzpOrderId;
+    }
+    const orderData = newOrder.toObject();
+
+    // Prepaid reservations are not auto-released: the current Razorpay flow
+    // has no trusted terminal-expiry signal that rules out a later capture.
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        for (const item of itemsWithPrice) {
+          const stockUpdate = await Product.updateOne(
+            {
+              _id: item.product_id,
+              stock_quantity: { $gte: item.quantity },
+            },
+            { $inc: { stock_quantity: -item.quantity } },
+            { session },
+          );
+
+          if (stockUpdate.matchedCount !== 1) {
+            const stockError = new Error(
+              `Insufficient stock for product ${item.name}.`,
+            );
+            stockError.code = "INSUFFICIENT_STOCK";
+            throw stockError;
+          }
+
+          await InventoryLog.create(
+            [
+              {
+                product_id: item.product_id,
+                change_amount: -item.quantity,
+                reason: `Reserved - Order #${localOrderId}`,
+              },
+            ],
+            { session },
+          );
+        }
+
+        const orderToSave = new Order(orderData);
+        await orderToSave.save({ session });
+        newOrder = orderToSave;
+      });
+    } finally {
+      await session.endSession();
+    }
 
     // ===========================
     // CASH ON DELIVERY FLOW
     // ===========================
     if (paymentMethod === "COD") {
-      newOrder.status = "Pending";
-      newOrder.payment_status = "Pending";
-      await newOrder.save();
-
       try {
         const customer = await User.findById(userId);
         if (customer) {
@@ -893,7 +867,7 @@ export const createOrder = async (req, res) => {
           });
         }
       } catch (shipErr) {
-        console.error("COD Shiprocket registration failed:", shipErr);
+        console.error("COD Shiprocket registration failed.");
       }
 
       return res.status(201).json({
@@ -910,31 +884,6 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // 5. Integrate with Razorpay (Create Razorpay Order)
-    let rzpOrder = null;
-    let rzpOrderId = `mock_order_${localOrderId}_${Date.now()}`;
-
-    if (!isMockMode()) {
-      try {
-        const options = {
-          amount: Math.round(totalAmount * 100), // in paise
-          currency: "INR",
-          receipt: `receipt_order_${localOrderId}`,
-        };
-        rzpOrder = await razorpayInstance.orders.create(options);
-        rzpOrderId = rzpOrder.id;
-      } catch (rzpErr) {
-        console.error(
-          "Razorpay order creation failed, defaulting to mock credentials:",
-          rzpErr,
-        );
-      }
-    }
-
-    // Update order with razorpay_order_id
-    newOrder.razorpay_order_id = rzpOrderId;
-    await newOrder.save();
-
     res.status(201).json({
       message: "Order checkout initiated.",
       orderId: localOrderId,
@@ -948,7 +897,10 @@ export const createOrder = async (req, res) => {
       isMock: isMockMode(),
     });
   } catch (error) {
-    console.error("Create order checkout error:", error);
+    if (error.code === "INSUFFICIENT_STOCK") {
+      return res.status(400).json({ message: error.message });
+    }
+    console.error("Create order checkout failed.");
     res.status(500).json({ message: "Internal server error." });
   }
 };
@@ -957,10 +909,6 @@ export const trackOrder = async (req, res) => {
   try {
     const userId = req.user.id;
     const { orderId } = req.params;
-
-    console.log("========== TRACK ORDER ==========");
-    console.log("Requested orderId:", orderId);
-    console.log("Authenticated userId:", userId);
 
     const order = await Order.findOne({
       _id: orderId,
@@ -987,7 +935,7 @@ export const trackOrder = async (req, res) => {
       tracking: trackingResponse.tracking_data || null,
     });
   } catch (error) {
-    console.error("Shiprocket tracking error:", error.response?.data || error);
+    console.error("Shiprocket tracking request failed.");
 
     return res.status(500).json({
       message: "Unable to fetch tracking details.",
@@ -999,16 +947,30 @@ export const trackOrder = async (req, res) => {
  * Verify Razorpay payment and confirm order
  */
 export const verifyPayment = async (req, res) => {
-  console.log("========== VERIFY PAYMENT ==========");
-  console.log(req.body);
   const userId = req.user.id;
   const { orderId, razorpayPaymentId, razorpayOrderId, razorpaySignature } =
     req.body;
 
-  if (!orderId || !razorpayPaymentId || !razorpayOrderId) {
-    return res
-      .status(400)
-      .json({ message: "Required payment parameters missing." });
+  if (
+    !orderId ||
+    !razorpayPaymentId ||
+    !razorpayOrderId ||
+    !razorpaySignature
+  ) {
+    return res.status(400).json({
+      message: "Required payment parameters missing.",
+    });
+  }
+
+  if (
+    !isMockMode() &&
+    [razorpayPaymentId, razorpayOrderId].some(
+      (id) => typeof id === "string" && id.startsWith("mock_"),
+    )
+  ) {
+    return res.status(400).json({
+      message: "Mock payment identifiers are not accepted.",
+    });
   }
 
   try {
@@ -1017,11 +979,21 @@ export const verifyPayment = async (req, res) => {
     if (!order) {
       return res.status(404).json({ message: "Order not found." });
     }
+    if (order.razorpay_order_id !== razorpayOrderId) {
+      return res.status(400).json({
+        message: "Payment does not belong to this order.",
+      });
+    }
     if (order.payment_status === "Paid") {
       return res.status(200).json({
         success: true,
         message: "Payment already verified.",
         orderId: order.id,
+      });
+    }
+    if (order.inventory_status === "Released") {
+      return res.status(409).json({
+        message: "The payment reservation for this order has expired.",
       });
     }
     if (order.status !== "Pending") {
@@ -1033,82 +1005,128 @@ export const verifyPayment = async (req, res) => {
     // 2. Signature verification
     let isPaymentValid = false;
 
-    if (isMockMode() || razorpayOrderId.startsWith("mock_")) {
-      // Mock payment mode skips cryptographic check
+    if (isMockMode()) {
+      // Mock payments are allowed only when the SERVER is
+      // explicitly running in non-production mock mode.
       isPaymentValid = true;
     } else {
       const keySecret = process.env.RAZORPAY_KEY_SECRET;
+
+      if (!keySecret) {
+        return res.status(500).json({
+          message: "Payment configuration error.",
+        });
+      }
+
       const expectedSignature = crypto
         .createHmac("sha256", keySecret)
         .update(razorpayOrderId + "|" + razorpayPaymentId)
         .digest("hex");
 
-      isPaymentValid = expectedSignature === razorpaySignature;
+      const receivedBuffer = Buffer.from(String(razorpaySignature), "utf8");
+
+      const expectedBuffer = Buffer.from(expectedSignature, "utf8");
+
+      isPaymentValid =
+        receivedBuffer.length === expectedBuffer.length &&
+        crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
     }
 
     if (!isPaymentValid) {
-      return res
-        .status(400)
-        .json({ message: "Payment signature verification failed." });
+      return res.status(400).json({
+        message: "Payment signature verification failed.",
+      });
     }
 
-    // 3. Confirm order & register payment in database
-    order.status = "Confirmed";
-    order.payment_status = "Paid";
-    order.razorpay_payment_id = razorpayPaymentId;
-    await order.save();
-
-    const payment = new Payment({
-      order_id: orderId,
-      razorpay_payment_id: razorpayPaymentId,
-      amount: order.total_amount,
-      status: "captured",
-      method: "digital",
-    });
-    await payment.save();
-
-    // 4. Update inventory and log stock removal
-    for (const item of order.items) {
-      await Product.findByIdAndUpdate(item.product_id, {
-        $inc: { stock_quantity: -item.quantity },
-      });
-
-      const log = new InventoryLog({
-        product_id: item.product_id,
-        change_amount: -item.quantity,
-        reason: `Purchase - Order #${orderId}`,
-      });
-      await log.save();
-    }
-
-    // 5. Send order confirmation email
-    const customer = await User.findById(userId);
-    if (customer) {
+    // 3. Verify the real Razorpay payment
+    if (!isMockMode()) {
       try {
-        await sendEmail({
-          to: customer.email,
-          subject: `Order Confirmed! - Bhatkar Perfumes Order #${orderId}`,
-          text: `Hello ${customer.name}, your order #${orderId} of ₹${order.total_amount} has been successfully placed and confirmed. Thank you for shopping with Bhatkar Perfumes!`,
-          html: `
-            <div style="font-family: Arial, sans-serif; background-color: #FAF9F6; color: #1F1F1F; padding: 30px; border-radius: 4px; max-width: 600px; margin: 0 auto; border: 1px solid #E4E4E0;">
-              <h2 style="color: #B89765; text-align: center; font-family: 'Playfair Display', Georgia, serif;">Order Confirmed!</h2>
-              <p>Hello ${customer.name},</p>
-              <p>We are delighted to let you know that your payment was successful and your order has been confirmed.</p>
-              <hr style="border: 0; border-top: 1px solid #E4E4E0; margin: 20px 0;">
-              <h3 style="color: #B89765; font-family: 'Playfair Display', Georgia, serif;">Order Summary</h3>
-              <p><strong>Order ID:</strong> #${orderId}</p>
-              <p><strong>Total Amount Paid:</strong> ₹${order.total_amount}</p>
-              <p><strong>Payment ID:</strong> ${razorpayPaymentId}</p>
-              <p>We are preparing your luxurious fragrance selection. You can track your order status directly on your dashboard.</p>
-              <p style="text-align: center; margin-top: 30px;">
-                <a href="${process.env.FRONTEND_URL || "http://localhost:3000"}/dashboard" style="background-color: #1F1F1F; color: #FFFFFF; padding: 12px 25px; text-decoration: none; font-weight: bold; border-radius: 4px;">Go to Dashboard</a>
-              </p>
-            </div>
-          `,
+        let paymentDetails =
+          await razorpayInstance.payments.fetch(razorpayPaymentId);
+
+        const expectedAmount = Math.round(Number(order.total_amount) * 100);
+
+        if (paymentDetails.order_id !== order.razorpay_order_id) {
+          return res.status(400).json({
+            message: "Payment does not belong to this order.",
+          });
+        }
+
+        if (paymentDetails.amount !== expectedAmount) {
+          return res.status(400).json({
+            message: "Payment amount does not match the order.",
+          });
+        }
+
+        if (paymentDetails.currency !== "INR") {
+          return res.status(400).json({
+            message: "Invalid payment currency.",
+          });
+        }
+
+        if (paymentDetails.status === "authorized") {
+          paymentDetails = await captureAuthorizedPayment({
+            orderId: order._id,
+            razorpayPaymentId,
+            razorpayOrderId,
+            amountPaise: Number(paymentDetails.amount),
+            currency: paymentDetails.currency,
+            paymentMethod: paymentDetails.method || "digital",
+          });
+        }
+
+        if (paymentDetails.status !== "captured") {
+          return res.status(400).json({
+            message: "Payment has not been captured.",
+          });
+        }
+      } catch (error) {
+        console.error("Razorpay payment verification error:", error.message);
+
+        return res.status(502).json({
+          message: "Unable to verify payment with Razorpay.",
         });
-      } catch (err) {
-        console.error("Nodemailer confirmation email failed:", err);
       }
+    }
+
+    // ----------------------------------------
+    // 4. Finalize payment atomically
+    // ----------------------------------------
+
+    let finalizationResult;
+
+    try {
+      finalizationResult = await finalizeSuccessfulPayment({
+        orderId: order._id,
+        razorpayPaymentId,
+        razorpayOrderId,
+        amountPaise: Math.round(Number(order.total_amount) * 100),
+        currency: "INR",
+        paymentStatus: "captured",
+        paymentMethod: "digital",
+      });
+    } catch (finalizeError) {
+      console.error("Payment finalization failed:", finalizeError.message);
+
+      return res.status(400).json({
+        message: finalizeError.message,
+      });
+    }
+
+    if (finalizationResult.alreadyFinalized) {
+      return res.status(200).json({
+        success: true,
+        message: "Payment already verified.",
+        orderId: order.id,
+      });
+    }
+
+    const customer = await User.findById(userId);
+
+    if (!customer) {
+      console.error(
+        "Customer not found while registering Shiprocket shipment.",
+      );
     }
 
     // 6. Register with Shiprocket for prepaid orders only
@@ -1139,7 +1157,7 @@ export const verifyPayment = async (req, res) => {
           });
         }
       } catch (shipErr) {
-        console.error("Shiprocket registration after payment failed:", shipErr);
+        console.error("Shiprocket registration after payment failed.");
       }
     } else {
       console.debug(
@@ -1319,16 +1337,9 @@ export const downloadInvoice = async (req, res) => {
     // Generate Shiprocket invoice
     // ----------------------------------------
 
-    console.log("========== GENERATING SHIPROCKET INVOICE ==========");
-    console.log("Local Order ID:", orderId);
-    console.log("Shiprocket Order ID:", order.shiprocket_order_id);
-
     const invoiceResponse = await generateShiprocketInvoice(
       order.shiprocket_order_id,
     );
-
-    console.log("========== SHIPROCKET INVOICE RESPONSE ==========");
-    console.log(JSON.stringify(invoiceResponse, null, 2));
 
     // ----------------------------------------
     // Get invoice URL
@@ -1343,35 +1354,18 @@ export const downloadInvoice = async (req, res) => {
       invoiceResponse?.data?.url;
 
     if (!invoiceUrl) {
-      console.error("Shiprocket invoice URL missing:", invoiceResponse);
+      console.error("Shiprocket invoice URL missing.");
 
       return res.status(400).json({
         message: "Shiprocket invoice could not be generated.",
       });
     }
 
-    console.log("Shiprocket Invoice URL:", invoiceUrl);
-
     // ----------------------------------------
     // Download PDF from Shiprocket
     // ----------------------------------------
 
-    const pdfResponse = await fetch(invoiceUrl);
-
-    if (!pdfResponse.ok) {
-      console.error(
-        "Failed to download Shiprocket invoice:",
-        pdfResponse.status,
-        pdfResponse.statusText,
-      );
-
-      return res.status(502).json({
-        message: "Unable to download invoice from Shiprocket.",
-      });
-    }
-
-    const arrayBuffer = await pdfResponse.arrayBuffer();
-    const pdfBuffer = Buffer.from(arrayBuffer);
+    const pdfBuffer = await downloadShiprocketInvoice(invoiceUrl);
 
     // ----------------------------------------
     // Send Shiprocket PDF to frontend
@@ -1388,10 +1382,7 @@ export const downloadInvoice = async (req, res) => {
 
     return res.status(200).send(pdfBuffer);
   } catch (error) {
-    console.error(
-      "Invoice PDF download error:",
-      error.response?.data || error.message || error,
-    );
+    console.error("Invoice PDF download failed.");
 
     return res.status(500).json({
       message: "Unable to generate invoice.",

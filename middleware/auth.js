@@ -6,15 +6,16 @@ dotenv.config();
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
-if (!JWT_SECRET) {
-  throw new Error("JWT_SECRET is not configured.");
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  throw new Error(
+    "JWT_SECRET must be configured and at least 32 characters long.",
+  );
 }
 
 /**
  * Verify JWT token middleware
  */
 export const verifyToken = async (req, res, next) => {
-
   const token = req.cookies.token;
 
   if (!token) {
@@ -24,14 +25,42 @@ export const verifyToken = async (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      algorithms: ["HS256"],
+    });
 
-    // Check if user still exists in database
+    if (!decoded?.id) {
+      return res.status(401).json({
+        message: "Invalid token.",
+      });
+    }
+
     const user = await User.findById(decoded.id).select(
-      "email role name is_verified",
+      "email role name is_verified session_version",
     );
+
     if (!user) {
-      return res.status(401).json({ message: "User no longer exists." });
+      return res.status(401).json({
+        message: "User no longer exists.",
+      });
+    }
+
+    if (user.role === "blocked") {
+      return res.status(403).json({
+        message: "Your account has been blocked.",
+      });
+    }
+
+    const currentSessionVersion = Number(user.session_version || 0);
+    const tokenSessionVersion = Number(decoded.session_version);
+
+    if (
+      !Number.isInteger(tokenSessionVersion) ||
+      tokenSessionVersion !== currentSessionVersion
+    ) {
+      return res.status(401).json({
+        message: "Session expired. Please login again.",
+      });
     }
 
     req.user = user;
@@ -42,7 +71,7 @@ export const verifyToken = async (req, res, next) => {
         .status(401)
         .json({ message: "Token expired. Please login again." });
     }
-    return res.status(400).json({ message: "Invalid token." });
+    return res.status(401).json({ message: "Invalid token." });
   }
 };
 

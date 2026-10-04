@@ -18,14 +18,15 @@ import {
   toggleCouponStatus,
   deleteCoupon,
 } from "../controllers/adminController.js";
+import { adminResetLimiter } from "../middleware/authRateLimiters.js";
 import { verifyToken, isAdmin } from "../middleware/auth.js";
 import upload from "../middleware/upload.js";
 
 const router = express.Router();
 
 /* Public Routes */
-router.post("/forgot-password", forgotAdminPassword);
-router.post("/reset-password", resetAdminPassword);
+router.post("/forgot-password", adminResetLimiter, forgotAdminPassword);
+router.post("/reset-password", adminResetLimiter, resetAdminPassword);
 
 // Apply auth protection and admin check to all admin routes
 router.use(verifyToken, isAdmin);

@@ -32,7 +32,23 @@ const userSchema = new mongoose.Schema(
 
     role: {
       type: String,
+      enum: ["user", "admin", "blocked"],
       default: "user",
+    },
+
+    session_version: {
+      type: Number,
+      default: 0,
+    },
+
+    admin_reset_attempts: {
+      type: Number,
+      select: false,
+    },
+
+    admin_reset_attempts_reset_at: {
+      type: Date,
+      select: false,
     },
 
     name: {

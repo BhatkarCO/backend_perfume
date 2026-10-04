@@ -38,16 +38,17 @@ export const getInstagramFeed = async (req, res) => {
     );
 
     profileUrl.searchParams.set("fields", "id,username");
-    profileUrl.searchParams.set("access_token", accessToken);
-
-    const profileResponse = await fetch(profileUrl.toString());
+    const profileResponse = await fetch(profileUrl.toString(), {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
 
     const profileData = await profileResponse.json();
 
     if (!profileResponse.ok) {
-      console.error("Instagram profile API error:", {
+      console.error("Instagram profile request failed.", {
         status: profileResponse.status,
-        message: profileData?.error?.message,
       });
 
       return res.status(502).json({
@@ -79,16 +80,17 @@ export const getInstagramFeed = async (req, res) => {
     );
 
     mediaUrl.searchParams.set("limit", "10");
-    mediaUrl.searchParams.set("access_token", accessToken);
-
-    const mediaResponse = await fetch(mediaUrl.toString());
+    const mediaResponse = await fetch(mediaUrl.toString(), {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
 
     const mediaData = await mediaResponse.json();
 
     if (!mediaResponse.ok) {
-      console.error("Instagram media API error:", {
+      console.error("Instagram media request failed.", {
         status: mediaResponse.status,
-        message: mediaData?.error?.message,
       });
 
       return res.status(502).json({
@@ -135,10 +137,8 @@ export const getInstagramFeed = async (req, res) => {
     cachedAt = Date.now();
 
     return res.status(200).json(responsePayload);
-  } catch (error) {
-    console.error("Instagram feed error:", {
-      message: error.message,
-    });
+  } catch {
+    console.error("Instagram feed request failed.");
 
     return res.status(500).json({
       success: false,

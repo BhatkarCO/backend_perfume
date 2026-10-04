@@ -1,4 +1,18 @@
 import Order from "../models/Order.js";
+import crypto from "crypto";
+import mongoose from "mongoose";
+
+const canonicalize = (value) => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalize(value[key])]),
+    );
+  }
+  return value;
+};
 
 // ----------------------------------------
 // Convert Shiprocket status → our DB status
@@ -101,7 +115,16 @@ export const handleShiprocketWebhook = async (req, res) => {
     const receivedToken = req.headers["x-api-key"];
     const expectedToken = process.env.SHIPROCKET_WEBHOOK_TOKEN;
 
-    if (!expectedToken || receivedToken !== expectedToken) {
+    const receivedBuffer = Buffer.from(String(receivedToken || ""));
+
+    const expectedBuffer = Buffer.from(String(expectedToken || ""));
+
+    const tokenValid =
+      expectedBuffer.length > 0 &&
+      receivedBuffer.length === expectedBuffer.length &&
+      crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+
+    if (!tokenValid) {
       console.warn("Invalid Shiprocket webhook token");
 
       return res.status(401).json({
@@ -110,6 +133,19 @@ export const handleShiprocketWebhook = async (req, res) => {
         message: "Unauthorized",
       });
     }
+
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return res.status(400).json({
+        received: false,
+        updated: false,
+        message: "Invalid webhook payload.",
+      });
+    }
+
+    const eventHash = crypto
+      .createHash("sha256")
+      .update(JSON.stringify(canonicalize(payload)))
+      .digest("hex");
 
     // ----------------------------------------
     // Extract AWB
@@ -186,101 +222,71 @@ export const handleShiprocketWebhook = async (req, res) => {
       });
     }
 
-    // ----------------------------------------
-    // Find local order
-    // ----------------------------------------
-    let order = null;
-
-    // First try AWB
-    if (awb) {
-      order = await Order.findOne({
-        shiprocket_awb: String(awb),
-      });
-    }
-
-    // If not found, try shipment ID
-    if (!order && shipmentId) {
-      order = await Order.findOne({
-        shiprocket_shipment_id: Number(shipmentId),
-      });
-    }
-
-    // If not found, try Shiprocket order ID
-    if (!order && shiprocketOrderId) {
-      order = await Order.findOne({
-        shiprocket_order_id: String(shiprocketOrderId),
-      });
-    }
-
-    // ----------------------------------------
-    // Order not found
-    // ----------------------------------------
-    if (!order) {
-      console.warn("No local order found for Shiprocket webhook:", {
-        awb,
-        shipmentId,
-        shiprocketOrderId,
-      });
-
-      return res.status(200).json({
-        received: true,
-        updated: false,
-      });
-    }
-
-    // ----------------------------------------
-    // Update Shiprocket information
-    // ----------------------------------------
-    if (awb) {
-      order.shiprocket_awb = String(awb);
-    }
-
+    const conditions = [];
+    if (awb) conditions.push({ shiprocket_awb: String(awb) });
     if (shipmentId) {
-      order.shiprocket_shipment_id = Number(shipmentId);
-    }
-
-    if (shiprocketOrderId) {
-      order.shiprocket_order_id = String(shiprocketOrderId);
-    }
-
-    // ----------------------------------------
-    // Update status
-    // ----------------------------------------
-    if (normalizedStatus) {
-      const currentStatus = order.shiprocket_status;
-
-      const currentPriority = statusPriority[currentStatus] || 0;
-
-      const newPriority = statusPriority[normalizedStatus] || 0;
-
-      // Only update if this is not an older status
-      if (newPriority >= currentPriority) {
-        order.shiprocket_status = normalizedStatus;
-
-        console.log(
-          `Status updated: ${currentStatus || "NONE"} → ${normalizedStatus}`,
-        );
-      } else {
-        console.warn(
-          `Ignoring status "${normalizedStatus}" because order is already "${order.shiprocket_status}"`,
-        );
+      const parsedShipmentId = Number(shipmentId);
+      if (Number.isFinite(parsedShipmentId)) {
+        conditions.push({ shiprocket_shipment_id: parsedShipmentId });
       }
-    } else {
-      console.warn(
-        `Unknown Shiprocket status received: "${rawStatus}" (ID: ${rawStatusId})`,
-      );
+    }
+    if (shiprocketOrderId) {
+      conditions.push({ shiprocket_order_id: String(shiprocketOrderId) });
     }
 
-    // ----------------------------------------
-    // Save order
-    // ----------------------------------------
-    await order.save();
+    const session = await mongoose.startSession();
+    let order = null;
+    try {
+      if (conditions.length === 0) {
+        return res.status(200).json({ received: true, updated: false });
+      }
 
-    console.log("Shiprocket order saved:", {
+      await session.withTransaction(async () => {
+        order = await Order.findOne({ $or: conditions }).session(session);
+        if (!order) return;
+
+        await mongoose.connection
+          .collection("shiprocket_webhook_events")
+          .insertOne(
+            { _id: eventHash, processed_at: new Date() },
+            { session },
+          );
+
+        if (awb) order.shiprocket_awb = String(awb);
+        if (shipmentId && Number.isFinite(Number(shipmentId))) {
+          order.shiprocket_shipment_id = Number(shipmentId);
+        }
+        if (shiprocketOrderId) {
+          order.shiprocket_order_id = String(shiprocketOrderId);
+        }
+
+        if (normalizedStatus) {
+          const currentStatus = order.shiprocket_status;
+          const currentPriority = statusPriority[currentStatus] || 0;
+          const newPriority = statusPriority[normalizedStatus] || 0;
+
+          if (newPriority >= currentPriority) {
+            order.shiprocket_status = normalizedStatus;
+          } else {
+            console.warn(
+              `Ignoring status "${normalizedStatus}" because order is already "${order.shiprocket_status}"`,
+            );
+          }
+        }
+
+        await order.save({ session });
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    if (!order) {
+      console.warn("No local order found for Shiprocket webhook.");
+      return res.status(200).json({ received: true, updated: false });
+    }
+
+    console.log("Shiprocket webhook processed.", {
       orderId: order._id,
-      shiprocketOrderId: order.shiprocket_order_id,
-      shipmentId: order.shiprocket_shipment_id,
-      awb: order.shiprocket_awb,
       status: order.shiprocket_status,
     });
 
@@ -293,9 +299,16 @@ export const handleShiprocketWebhook = async (req, res) => {
       status: order.shiprocket_status,
     });
   } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(200).json({
+        received: true,
+        updated: false,
+        duplicate: true,
+      });
+    }
+
     console.error(
-      "Shiprocket webhook error:",
-      error.response?.data || error.message,
+      "Shiprocket webhook processing failed.",
     );
 
     return res.status(200).json({

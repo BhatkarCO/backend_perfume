@@ -39,7 +39,7 @@ const productSchema = new mongoose.Schema(
       type: Number,
       default: 18,
     },
-    stock_quantity: { type: Number, default: 0 },
+    stock_quantity: { type: Number, default: 0, min: 0 },
     category_id: { type: mongoose.Schema.Types.ObjectId, ref: "Category" },
     gender: { type: String, enum: ["Men", "Women", "Unisex"] },
     rating: { type: Number, default: 0.0 },
