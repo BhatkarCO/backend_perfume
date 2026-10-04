@@ -11,7 +11,10 @@ export const chatWithAI = async (req, res) => {
     try {
       const response = await axios.post(
         AI_SERVICE_URL,
-        { message: req.body.message },
+        {
+          message: req.body.message,
+          session_id: req.body.session_id,
+        },
         {
           timeout: 15000,
           maxBodyLength: 8 * 1024,
@@ -19,11 +22,10 @@ export const chatWithAI = async (req, res) => {
           headers: {
             "Content-Type": "application/json",
           },
-        }
+        },
       );
 
       return res.status(200).json(response.data);
-
     } catch (error) {
       const status = error.response?.status;
       console.warn("AI service request failed.", { attempt, status });
